@@ -1,0 +1,5 @@
+<resources>
+    <string name="app_name">Digital Parent</string>
+    <string name="accessibility_service_description">Monitors foreground applications to enforce digital parenting limits and prevent access to restricted apps.</string>
+    <string name="device_admin_description">Enables parental/system-level device controls to prevent unauthorized modification or app uninstallation.</string>
+</resources>

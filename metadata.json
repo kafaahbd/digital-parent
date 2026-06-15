@@ -1,0 +1,6 @@
+{
+  "name": "Digital Parent",
+  "description": "A digital parenting and self-control application with core system and permissions administration.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
