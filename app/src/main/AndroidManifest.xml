@@ -25,6 +25,13 @@
             </intent-filter>
         </activity>
 
+        <activity
+            android:name=".BlockerActivity"
+            android:launchMode="singleInstance"
+            android:excludeFromRecents="true"
+            android:exported="false"
+            android:theme="@style/Theme.MyApplication" />
+
         <service
             android:name=".DigitalParentAccessibilityService"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE"
