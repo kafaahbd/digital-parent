@@ -77,28 +77,32 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
         setContent {
-            MyApplicationTheme {
+            val viewModel: MainViewModel = viewModel()
+            val themeMode by viewModel.themeMode.collectAsStateWithLifecycle()
+            
+            val isDark = when (themeMode) {
+                1 -> false // Light Mode
+                2 -> true  // Dark Mode
+                else -> androidx.compose.foundation.isSystemInDarkTheme() // System Default
+            }
+
+            MyApplicationTheme(darkTheme = isDark) {
                 Scaffold(
                     modifier = Modifier
                         .fillMaxSize()
                         .testTag("main_scaffold"),
-                    contentWindowInsets = WindowInsets.safeDrawing
+                    contentWindowInsets = WindowInsets.safeDrawing,
+                    containerColor = MaterialTheme.colorScheme.background
                 ) { innerPadding ->
                     Box(
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(innerPadding)
-                            .background(
-                                Brush.verticalGradient(
-                                    colors = listOf(
-                                        Color(0xFF0F172A), // Slate 900
-                                        Color(0xFF020617)  // Slate 950
-                                    )
-                                )
-                            )
+                            .background(MaterialTheme.colorScheme.background)
                     ) {
                         PermissionDashboardScreen(
-                            onToggleOverlay = { toggleDemoOverlay() }
+                            onToggleOverlay = { toggleDemoOverlay() },
+                            viewModel = viewModel
                         )
                     }
                 }
@@ -216,6 +220,9 @@ class MainViewModel : ViewModel() {
     private val _chosenDelay = MutableStateFlow(1) // in minutes
     val chosenDelay: StateFlow<Int> = _chosenDelay.asStateFlow()
 
+    private val _themeMode = MutableStateFlow(0)
+    val themeMode: StateFlow<Int> = _themeMode.asStateFlow()
+
     private var lockManager: SettingsLockManager? = null
     private var repository: BlockedAppRepository? = null
 
@@ -226,6 +233,7 @@ class MainViewModel : ViewModel() {
             _chosenDelay.value = lockManager!!.getChosenDelayMinutes()
             _isSettingsLocked.value = lockManager!!.isLocked()
             _remainingTimeMs.value = lockManager!!.getRemainingTimeMs()
+            _themeMode.value = lockManager!!.getThemeOption()
         }
         if (repository == null) {
             repository = BlockedAppRepository(appCtx)
@@ -309,14 +317,27 @@ class MainViewModel : ViewModel() {
             _isAppsLoading.value = true
             try {
                 val pm = context.packageManager
-                val intent = Intent(Intent.ACTION_MAIN, null).apply {
+                val apps = pm.getInstalledApplications(PackageManager.GET_META_DATA)
+                val launcherIntent = Intent(Intent.ACTION_MAIN, null).apply {
                     addCategory(Intent.CATEGORY_LAUNCHER)
                 }
-                val activities = pm.queryIntentActivities(intent, 0)
-                val listOfApps = activities.mapNotNull { resolveInfo ->
-                    val pName = resolveInfo.activityInfo.packageName
-                    if (pName == "com.example") return@mapNotNull null // ignore ourselves
-                    val label = resolveInfo.loadLabel(pm).toString()
+                val launcherPackages = pm.queryIntentActivities(launcherIntent, 0)
+                    .map { it.activityInfo.packageName }
+                    .toSet()
+
+                val listOfApps = apps.mapNotNull { appInfo ->
+                    val pName = appInfo.packageName
+                    if (pName == context.packageName) return@mapNotNull null // ignore ourselves
+
+                    val isLauncherApp = launcherPackages.contains(pName)
+                    val isSystem = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
+                    val isUpdatedSystem = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_UPDATED_SYSTEM_APP) != 0
+
+                    if (isSystem && !isUpdatedSystem && !isLauncherApp) {
+                        return@mapNotNull null
+                    }
+
+                    val label = appInfo.loadLabel(pm).toString()
                     val isCurrentlyBlocked = blockedApps.any { it.packageName == pName && it.isBlocked }
                     AppInfoItem(appName = label, packageName = pName, isBlocked = isCurrentlyBlocked)
                 }.distinctBy { it.packageName }.sortedBy { it.appName }
@@ -333,6 +354,91 @@ class MainViewModel : ViewModel() {
     fun toggleAppBlocked(packageName: String, isBlocked: Boolean) {
         viewModelScope.launch {
             repository?.setAppBlocked(packageName, isBlocked)
+        }
+    }
+
+    fun setThemeOption(option: Int) {
+        _themeMode.value = option
+        lockManager?.setThemeOption(option)
+    }
+
+    fun onBackground(context: Context) {
+        if (_isSettingsLocked.value && _remainingTimeMs.value > 0) {
+            lockManager?.lockSettings()
+            _isSettingsLocked.value = true
+            _remainingTimeMs.value = 0L
+            Toast.makeText(context.applicationContext, "Lock Countdown immediately reset due to app backgrounding!", Toast.LENGTH_LONG).show()
+        }
+    }
+}
+
+@Composable
+fun ThemeSelectorSection(
+    currentThemeOption: Int,
+    onThemeSelect: (Int) -> Unit
+) {
+    Card(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("theme_selector_card"),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.surface
+        ),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Column(
+            modifier = Modifier.padding(16.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Text(
+                text = "VISUAL INTUITIVE STYLE",
+                style = MaterialTheme.typography.labelMedium.copy(
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.sp
+                ),
+                color = MaterialTheme.colorScheme.primary
+            )
+
+            Text(
+                text = "Adapt the interface dynamically to match your eye comfort preferences and save resources.",
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant
+            )
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                val modes = listOf(
+                    Triple(0, "System", "📺"),
+                    Triple(1, "Light", "☀️"),
+                    Triple(2, "Dark", "🌙")
+                )
+
+                modes.forEach { (option, label, icon) ->
+                    val isSelected = currentThemeOption == option
+                    Button(
+                        onClick = { onThemeSelect(option) },
+                        colors = ButtonDefaults.buttonColors(
+                            containerColor = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.surfaceVariant,
+                            contentColor = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                        ),
+                        modifier = Modifier
+                            .weight(1f)
+                            .height(36.dp),
+                        contentPadding = PaddingValues(0.dp),
+                        shape = RoundedCornerShape(8.dp)
+                    ) {
+                        Row(
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.Center
+                        ) {
+                            Text(text = "$icon ", fontSize = 11.sp)
+                            Text(text = label, fontWeight = FontWeight.Bold, fontSize = 11.sp)
+                        }
+                    }
+                }
+            }
         }
     }
 }
@@ -362,6 +468,8 @@ fun PermissionDashboardScreen(
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
                 viewModel.checkPermissions(context)
+            } else if (event == Lifecycle.Event.ON_PAUSE) {
+                viewModel.onBackground(context)
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
@@ -420,6 +528,14 @@ fun PermissionDashboardScreen(
                             isAccessibilityActive = state.isAccessibilityGranted,
                             isServiceRunning = isAccessibilityServiceConnected,
                             currentPackageName = currentApp
+                        )
+                    }
+
+                    item {
+                        val themeOptionState by viewModel.themeMode.collectAsStateWithLifecycle()
+                        ThemeSelectorSection(
+                            currentThemeOption = themeOptionState,
+                            onThemeSelect = { viewModel.setThemeOption(it) }
                         )
                     }
 
@@ -669,8 +785,25 @@ fun AppBlockingRow(
     appInfo: AppInfoItem,
     onToggleBlock: (Boolean) -> Unit
 ) {
-    val containerBg = if (appInfo.isBlocked) Color(0xFF450A0A).copy(alpha = 0.3f) else Color(0xFF1E293B)
-    val strokeColor = if (appInfo.isBlocked) Color(0xFFEF4444).copy(alpha = 0.4f) else Color(0xFF334155)
+    val context = LocalContext.current
+    val appIcon = remember(appInfo.packageName) {
+        try {
+            context.packageManager.getApplicationIcon(appInfo.packageName)
+        } catch (e: Exception) {
+            null
+        }
+    }
+
+    val containerBg = if (appInfo.isBlocked) {
+        MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)
+    } else {
+        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+    }
+    val strokeColor = if (appInfo.isBlocked) {
+        MaterialTheme.colorScheme.error.copy(alpha = 0.4f)
+    } else {
+        MaterialTheme.colorScheme.outlineVariant
+    }
 
     Row(
         modifier = Modifier
@@ -685,23 +818,30 @@ fun AppBlockingRow(
             modifier = Modifier.weight(1f),
             verticalAlignment = Alignment.CenterVertically
         ) {
-            // Cool initial pictogram avatar
             Box(
                 modifier = Modifier
                     .size(40.dp)
                     .background(
-                        if (appInfo.isBlocked) Color(0xFFEF4444).copy(alpha = 0.15f) else Color(0xFF38BDF8).copy(alpha = 0.1f),
+                        if (appInfo.isBlocked) MaterialTheme.colorScheme.error.copy(alpha = 0.15f) else MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
                         RoundedCornerShape(8.dp)
                     ),
                 contentAlignment = Alignment.Center
             ) {
-                Text(
-                    text = appInfo.appName.take(2).uppercase(),
-                    color = if (appInfo.isBlocked) Color(0xFFEF4444) else Color(0xFF38BDF8),
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.Bold,
-                    fontFamily = FontFamily.Monospace
-                )
+                if (appIcon != null) {
+                    coil.compose.AsyncImage(
+                        model = appIcon,
+                        contentDescription = "App Icon",
+                        modifier = Modifier.size(32.dp)
+                    )
+                } else {
+                    Text(
+                        text = appInfo.appName.take(2).uppercase(),
+                        color = if (appInfo.isBlocked) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.primary,
+                        fontSize = 14.sp,
+                        fontWeight = FontWeight.Bold,
+                        fontFamily = FontFamily.Monospace
+                    )
+                }
             }
 
             Spacer(modifier = Modifier.width(12.dp))
@@ -709,7 +849,7 @@ fun AppBlockingRow(
             Column {
                 Text(
                     text = appInfo.appName,
-                    color = Color.White,
+                    color = MaterialTheme.colorScheme.onSurface,
                     fontWeight = FontWeight.Bold,
                     fontSize = 15.sp,
                     maxLines = 1
@@ -717,7 +857,7 @@ fun AppBlockingRow(
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
                     text = appInfo.packageName,
-                    color = Color(0xFF64748B), // Slate 500
+                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                     fontSize = 11.sp,
                     fontFamily = FontFamily.Monospace,
                     maxLines = 1
@@ -731,10 +871,10 @@ fun AppBlockingRow(
             checked = appInfo.isBlocked,
             onCheckedChange = onToggleBlock,
             colors = SwitchDefaults.colors(
-                checkedThumbColor = Color.White,
-                checkedTrackColor = Color(0xFFEF4444),
-                uncheckedThumbColor = Color(0xFF94A3B8),
-                uncheckedTrackColor = Color(0xFF334155)
+                checkedThumbColor = MaterialTheme.colorScheme.onError,
+                checkedTrackColor = MaterialTheme.colorScheme.error,
+                uncheckedThumbColor = MaterialTheme.colorScheme.outline,
+                uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant
             ),
             modifier = Modifier.testTag("switch_${appInfo.packageName}")
         )

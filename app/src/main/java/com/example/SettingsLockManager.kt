@@ -10,6 +10,15 @@ class SettingsLockManager(context: Context) {
         private const val KEY_TARGET_UNLOCK_TIMESTAMP = "target_unlock_timestamp"
         private const val KEY_CHOSEN_DELAY_MINUTES = "chosen_delay_minutes"
         private const val KEY_IS_LOCKED_MANUALLY = "is_locked_manually"
+        private const val KEY_THEME_OPTION = "theme_option"
+    }
+
+    fun getThemeOption(): Int {
+        return prefs.getInt(KEY_THEME_OPTION, 0) // default to 0 (System Default)
+    }
+
+    fun setThemeOption(option: Int) {
+        prefs.edit().putInt(KEY_THEME_OPTION, option).apply()
     }
 
     fun getChosenDelayMinutes(): Int {

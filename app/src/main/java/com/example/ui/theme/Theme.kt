@@ -8,33 +8,38 @@ import androidx.compose.material3.dynamicDarkColorScheme
 import androidx.compose.material3.dynamicLightColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
+import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 
-private val DarkColorScheme =
-  darkColorScheme(primary = Purple80, secondary = PurpleGrey80, tertiary = Pink80)
+private val DarkColorScheme = darkColorScheme(
+    primary = ForestGreenDark,
+    secondary = MintAccentDark,
+    tertiary = MintAccentDark,
+    background = BackgroundDark,
+    surface = SurfaceDark,
+    onPrimary = Color(0xFF03140C),
+    onSecondary = Color(0xFF03140C),
+    onBackground = OnBackgroundDark,
+    onSurface = OnBackgroundDark
+)
 
-private val LightColorScheme =
-  lightColorScheme(
-    primary = Purple40,
-    secondary = PurpleGrey40,
-    tertiary = Pink40,
-
-    /* Other default colors to override
-    background = Color(0xFFFFFBFE),
-    surface = Color(0xFFFFFBFE),
+private val LightColorScheme = lightColorScheme(
+    primary = ForestGreenLight,
+    secondary = MintAccentLight,
+    tertiary = MintAccentLight,
+    background = BackgroundLight,
+    surface = SurfaceLight,
     onPrimary = Color.White,
     onSecondary = Color.White,
-    onTertiary = Color.White,
-    onBackground = Color(0xFF1C1B1F),
-    onSurface = Color(0xFF1C1B1F),
-    */
-  )
+    onBackground = OnBackgroundLight,
+    onSurface = OnBackgroundLight
+)
 
 @Composable
 fun MyApplicationTheme(
   darkTheme: Boolean = isSystemInDarkTheme(),
-  // Dynamic color is available on Android 12+
-  dynamicColor: Boolean = true,
+  // Dynamic color is set to false by default to showcase our beautiful custom Whitish-Green palette
+  dynamicColor: Boolean = false,
   content: @Composable () -> Unit,
 ) {
   val colorScheme =
