@@ -17,12 +17,16 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.*
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.annotation.Keep
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
@@ -223,6 +227,9 @@ class MainViewModel : ViewModel() {
     private val _themeMode = MutableStateFlow(0)
     val themeMode: StateFlow<Int> = _themeMode.asStateFlow()
 
+    private val _isOnboardingCompleted = MutableStateFlow(false)
+    val isOnboardingCompleted: StateFlow<Boolean> = _isOnboardingCompleted.asStateFlow()
+
     private var lockManager: SettingsLockManager? = null
     private var repository: BlockedAppRepository? = null
 
@@ -234,6 +241,7 @@ class MainViewModel : ViewModel() {
             _isSettingsLocked.value = lockManager!!.isLocked()
             _remainingTimeMs.value = lockManager!!.getRemainingTimeMs()
             _themeMode.value = lockManager!!.getThemeOption()
+            _isOnboardingCompleted.value = lockManager!!.isOnboardingCompleted()
         }
         if (repository == null) {
             repository = BlockedAppRepository(appCtx)
@@ -357,6 +365,13 @@ class MainViewModel : ViewModel() {
         }
     }
 
+    fun completeOnboarding(delayMinutes: Int) {
+        lockManager?.completeOnboarding(delayMinutes)
+        _isOnboardingCompleted.value = true
+        _chosenDelay.value = delayMinutes
+        _isSettingsLocked.value = true // safeguard is active instantly after onboarding
+    }
+
     fun setThemeOption(option: Int) {
         _themeMode.value = option
         lockManager?.setThemeOption(option)
@@ -457,12 +472,16 @@ fun PermissionDashboardScreen(
     val isSettingsLocked by viewModel.isSettingsLocked.collectAsStateWithLifecycle()
     val remainingTimeMs by viewModel.remainingTimeMs.collectAsStateWithLifecycle()
     val chosenDelay by viewModel.chosenDelay.collectAsStateWithLifecycle()
+    val isOnboardingCompleted by viewModel.isOnboardingCompleted.collectAsStateWithLifecycle()
 
     val currentApp by DigitalParentAccessibilityService.foregroundApp.collectAsStateWithLifecycle()
     val isAccessibilityServiceConnected by DigitalParentAccessibilityService.isServiceRunning.collectAsStateWithLifecycle()
 
     var searchQuery by remember { mutableStateOf("") }
     var selectedTab by remember { mutableIntStateOf(0) } // 0 = Safeguard Center, 1 = Live Settings Config
+    var showSettingsDialog by remember { mutableStateOf(false) }
+    var showUnlockPrompt by remember { mutableStateOf(false) }
+    var blockToUnblock by remember { mutableStateOf<AppInfoItem?>(null) }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
@@ -482,209 +501,388 @@ fun PermissionDashboardScreen(
         viewModel.initialize(context)
     }
 
-    Column(modifier = Modifier.fillMaxSize()) {
-        // Tab system for layout hygiene
-        TabRow(
-            selectedTabIndex = selectedTab,
-            containerColor = Color(0xFF0F172A),
-            contentColor = Color(0xFF38BDF8),
-            indicator = { tabPositions ->
-                TabRowDefaults.SecondaryIndicator(
-                    modifier = Modifier.tabIndicatorOffset(tabPositions[selectedTab]),
-                    color = Color(0xFF38BDF8)
-                )
+    // --- ONBOARDING FLOW ---
+    if (!isOnboardingCompleted) {
+        OnboardingSetupScreen(
+            onComplete = { minutes ->
+                viewModel.completeOnboarding(minutes)
+                Toast.makeText(context, "Permanent Self-Control Delay locked to $minutes min(s)", Toast.LENGTH_LONG).show()
             }
-        ) {
-            Tab(
-                selected = selectedTab == 0,
-                onClick = { selectedTab = 0 },
-                text = { Text("Permissions & Monitor", fontWeight = FontWeight.Bold, color = if (selectedTab == 0) Color.White else Color(0xFF94A3B8)) },
-                icon = { Icon(Icons.Default.Settings, contentDescription = "Config Icon", tint = if (selectedTab == 0) Color(0xFF38BDF8) else Color(0xFF64748B)) }
-            )
-            Tab(
-                selected = selectedTab == 1,
-                onClick = { selectedTab = 1 },
-                text = { Text("App Block Settings", fontWeight = FontWeight.Bold, color = if (selectedTab == 1) Color.White else Color(0xFF94A3B8)) },
-                icon = { Icon(Icons.Default.Warning, contentDescription = "Block Icon", tint = if (selectedTab == 1) Color(0xFFF87171) else Color(0xFF64748B)) }
-            )
-        }
+        )
+        return
+    }
 
-        Box(modifier = Modifier.weight(1f)) {
-            if (selectedTab == 0) {
-                // Safeguard Screen
-                LazyColumn(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(horizontal = 20.dp),
-                    contentPadding = PaddingValues(top = 16.dp, bottom = 32.dp),
-                    verticalArrangement = Arrangement.spacedBy(16.dp)
-                ) {
-                    item {
-                        HeaderSection()
-                    }
+    // --- COOLDOWN BLOCKOVERLAY (UN-BYPASSABLE FOREGROUND LOCK) ---
+    if (remainingTimeMs > 0) {
+        CountdownDelayScreen(
+            remainingMs = remainingTimeMs,
+            chosenDelay = chosenDelay,
+            onBypass = { viewModel.bypassUnlockForTesting() }
+        )
+        return
+    }
 
-                    item {
-                        SafeSystemLogConsole(
-                            isAccessibilityActive = state.isAccessibilityGranted,
-                            isServiceRunning = isAccessibilityServiceConnected,
-                            currentPackageName = currentApp
-                        )
-                    }
-
-                    item {
-                        val themeOptionState by viewModel.themeMode.collectAsStateWithLifecycle()
-                        ThemeSelectorSection(
-                            currentThemeOption = themeOptionState,
-                            onThemeSelect = { viewModel.setThemeOption(it) }
-                        )
-                    }
-
-                    item {
+    // --- CUSTOM SETTINGS OVERLAY ---
+    if (showSettingsDialog) {
+        AlertDialog(
+            onDismissRequest = { showSettingsDialog = false },
+            confirmButton = {
+                TextButton(onClick = { showSettingsDialog = false }) {
+                    Text("Close", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                }
+            },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Settings,
+                        contentDescription = "Settings Icon",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Security Settings", style = MaterialTheme.typography.titleMedium)
+                }
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(16.dp)) {
+                    val themeOptionState by viewModel.themeMode.collectAsStateWithLifecycle()
+                    ThemeSelectorSection(
+                        currentThemeOption = themeOptionState,
+                        onThemeSelect = { viewModel.setThemeOption(it) }
+                    )
+                    
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+                    
+                    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         Text(
-                            text = "SYSTEM ACCESS POLICIES",
-                            style = MaterialTheme.typography.titleSmall.copy(
+                            text = "SECURITY SHIELD PROFILE",
+                            style = MaterialTheme.typography.labelMedium.copy(
                                 fontWeight = FontWeight.Bold,
-                                letterSpacing = 1.2.sp
+                                letterSpacing = 1.sp
                             ),
-                            color = Color(0xFF64748B),
-                            modifier = Modifier.padding(vertical = 4.dp)
+                            color = MaterialTheme.colorScheme.primary
                         )
-                    }
-
-                    item {
-                        PermissionCard(
-                            title = "1. Accessibility Service",
-                            description = "Monitors app switches and window events to determine when restricted foreground applications are opened by children.",
-                            isGranted = state.isAccessibilityGranted,
-                            testTag = "accessibility_card",
-                            onConfigure = {
-                                val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                                context.startActivity(intent)
-                            }
+                        
+                        Text(
+                            text = "Permanent Self-Control Delay: $chosenDelay Min(s)",
+                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                            color = MaterialTheme.colorScheme.onSurface
                         )
-                    }
-
-                    item {
-                        PermissionCard(
-                            title = "2. Device Administrator",
-                            description = "Secures parental profiles on device, requiring parent authentication and preventing children from unauthorized uninstallation.",
-                            isGranted = state.isDeviceAdminGranted,
-                            testTag = "device_admin_card",
-                            onConfigure = {
-                                val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
-                                    putExtra(
-                                        DevicePolicyManager.EXTRA_DEVICE_ADMIN,
-                                        ComponentName(context, DeviceAdminComponent::class.java)
-                                    )
-                                    putExtra(
-                                        DevicePolicyManager.EXTRA_ADD_EXPLANATION,
-                                        "Provides parental/system-level device controls to prevent unauthorized app uninstallation."
-                                    )
-                                }
-                                context.startActivity(intent)
-                            }
-                        )
-                    }
-
-                    item {
-                        PermissionCard(
-                            title = "3. System Display Overlay",
-                            description = "Draws full-screen warning overlays over unauthorized apps and games, instantly restricting usage when time limits are reached.",
-                            isGranted = state.isOverlayGranted,
-                            testTag = "overlay_card",
-                            onConfigure = {
-                                val intent = Intent(
-                                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                    Uri.parse("package:${context.packageName}")
-                                )
-                                context.startActivity(intent)
-                            }
-                        )
-                    }
-
-                    item {
-                        OverlayTrialSection(
-                            isOverlayGranted = state.isOverlayGranted,
-                            onToggleOverlay = onToggleOverlay
+                        
+                        Text(
+                            text = "This delay is permanently locked via sandbox EncryptedSharedPreferences and cannot be modified. Any actions to unrestrict applications or settings will initiate this delay countdown.",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                     }
                 }
-            } else {
-                // App Selection & Delay Countdown screens
-                if (isSettingsLocked) {
-                    // Settings are LOCKED or COUNTING DOWN
-                    if (remainingTimeMs > 0) {
-                        // Countdown screen (Locked)
-                        CountdownDelayScreen(
-                            remainingMs = remainingTimeMs,
-                            onBypass = { viewModel.bypassUnlockForTesting() }
-                        )
-                    } else {
-                        // Locked Screen requiring unlock sequence initiation
-                        SettingsLockedScreen(
-                            chosenDelay = chosenDelay,
-                            onSelectDelay = { viewModel.setLockDelayMinutes(it) },
-                            onInitiateUnlock = { viewModel.initiateSettingsUnlockCountdown() }
-                        )
+            },
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(20.dp),
+            modifier = Modifier.widthIn(max = 440.dp)
+        )
+    }
+
+    // --- UNLOCK DELAY CONFIRMATION PROMPT ---
+    if (showUnlockPrompt) {
+        AlertDialog(
+            onDismissRequest = { showUnlockPrompt = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = "Alert",
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Deactivation Safeguard Active")
+                }
+            },
+            text = {
+                Text(
+                    text = "Turning OFF restriction rules for this application belongs to protected settings. To prevent impulsive bypasses, you must start and await through the un-bypassable self-control countdown of $chosenDelay Minute(s). Start countdown now?",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showUnlockPrompt = false
+                        viewModel.initiateSettingsUnlockCountdown()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Initiate Countdown", color = MaterialTheme.colorScheme.onError)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showUnlockPrompt = false }) {
+                    Text("Keep Blocked", color = MaterialTheme.colorScheme.primary)
+                }
+            },
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    Scaffold(
+        modifier = Modifier.fillMaxSize(),
+        containerColor = MaterialTheme.colorScheme.background
+    ) { paddingValues ->
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(paddingValues)
+        ) {
+            // Tab system for layout hygiene
+            TabRow(
+                selectedTabIndex = selectedTab,
+                containerColor = MaterialTheme.colorScheme.surface,
+                contentColor = MaterialTheme.colorScheme.primary,
+                indicator = { tabPositions ->
+                    TabRowDefaults.SecondaryIndicator(
+                        modifier = Modifier.tabIndicatorOffset(tabPositions[selectedTab]),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+            ) {
+                Tab(
+                    selected = selectedTab == 0,
+                    onClick = { selectedTab = 0 },
+                    text = { Text("Permissions & Monitor", fontWeight = FontWeight.Bold) },
+                    icon = { Icon(Icons.Default.Settings, contentDescription = "Config Icon") }
+                )
+                Tab(
+                    selected = selectedTab == 1,
+                    onClick = { selectedTab = 1 },
+                    text = { Text("App Block Settings", fontWeight = FontWeight.Bold) },
+                    icon = { Icon(Icons.Default.Warning, contentDescription = "Block Icon") }
+                )
+            }
+
+            Box(modifier = Modifier.weight(1f)) {
+                if (selectedTab == 0) {
+                    // Safeguard Screen
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 20.dp),
+                        contentPadding = PaddingValues(top = 16.dp, bottom = 32.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        item {
+                            HeaderSection(onOpenSettings = { showSettingsDialog = true })
+                        }
+
+                        item {
+                            val isProtected = state.isAccessibilityGranted && state.isDeviceAdminGranted && state.isOverlayGranted
+                            val blockedAppsCount = appItems.count { it.isBlocked }
+                            val permissionsCount = (if (state.isAccessibilityGranted) 1 else 0) + 
+                                                   (if (state.isDeviceAdminGranted) 1 else 0) + 
+                                                   (if (state.isOverlayGranted) 1 else 0)
+                            StatusCard(
+                                isProtected = isProtected,
+                                blockedCount = blockedAppsCount,
+                                requiredPermissionsCount = permissionsCount,
+                                onActivatePermissions = {
+                                    if (!state.isAccessibilityGranted) {
+                                        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                        context.startActivity(intent)
+                                    } else if (!state.isDeviceAdminGranted) {
+                                        val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                                            putExtra(
+                                                DevicePolicyManager.EXTRA_DEVICE_ADMIN,
+                                                ComponentName(context, DeviceAdminComponent::class.java)
+                                            )
+                                        }
+                                        context.startActivity(intent)
+                                    } else if (!state.isOverlayGranted) {
+                                        val intent = Intent(
+                                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                            Uri.parse("package:${context.packageName}")
+                                        )
+                                        context.startActivity(intent)
+                                    }
+                                }
+                            )
+                        }
+
+                        item {
+                            SafeSystemLogConsole(
+                                isAccessibilityActive = state.isAccessibilityGranted,
+                                isServiceRunning = isAccessibilityServiceConnected,
+                                currentPackageName = currentApp
+                            )
+                        }
+
+                        item {
+                            Text(
+                                text = "SYSTEM ACCESS POLICIES",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    letterSpacing = 1.2.sp
+                                ),
+                                color = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.padding(vertical = 4.dp)
+                            )
+                        }
+
+                        item {
+                            PermissionCard(
+                                title = "1. Accessibility Service",
+                                description = "Monitors app switches and window events to determine when restricted foreground applications are opened by children.",
+                                isGranted = state.isAccessibilityGranted,
+                                testTag = "accessibility_card",
+                                onConfigure = {
+                                    val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                    context.startActivity(intent)
+                                }
+                            )
+                        }
+
+                        item {
+                            PermissionCard(
+                                title = "2. Device Administrator",
+                                description = "Secures parental profiles on device, requiring parent authentication and preventing children from unauthorized uninstallation.",
+                                isGranted = state.isDeviceAdminGranted,
+                                testTag = "device_admin_card",
+                                onConfigure = {
+                                    val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                                        putExtra(
+                                            DevicePolicyManager.EXTRA_DEVICE_ADMIN,
+                                            ComponentName(context, DeviceAdminComponent::class.java)
+                                        )
+                                        putExtra(
+                                            DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                                            "Provides parental/system-level device controls to prevent unauthorized app uninstallation."
+                                        )
+                                    }
+                                    context.startActivity(intent)
+                                }
+                            )
+                        }
+
+                        item {
+                            PermissionCard(
+                                title = "3. System Display Overlay",
+                                description = "Draws full-screen warning overlays over unauthorized apps and games, instantly restricting usage when time limits are reached.",
+                                isGranted = state.isOverlayGranted,
+                                testTag = "overlay_card",
+                                onConfigure = {
+                                    val intent = Intent(
+                                        Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                                        Uri.parse("package:${context.packageName}")
+                                    )
+                                    context.startActivity(intent)
+                                }
+                            )
+                        }
+
+                        item {
+                            OverlayTrialSection(
+                                isOverlayGranted = state.isOverlayGranted,
+                                onToggleOverlay = onToggleOverlay
+                            )
+                        }
                     }
                 } else {
-                    // UNLOCKED: Visible App Selection Screen
+                    // App Selection Screen (ALWAYS accessible to enable blocking instantly!)
                     Column(
                         modifier = Modifier
                             .fillMaxSize()
                             .padding(16.dp),
                         verticalArrangement = Arrangement.spacedBy(12.dp)
                     ) {
-                        // Unlocked State Header Control block
-                        Card(
-                            modifier = Modifier.fillMaxWidth(),
-                            colors = CardDefaults.cardColors(containerColor = Color(0xFF0F172A)),
-                            border = BorderStroke(1.dp, Color(0xFF10B981)) // Green border showing active config state
-                        ) {
-                            Column(modifier = Modifier.padding(16.dp)) {
-                                Row(
-                                    modifier = Modifier.fillMaxWidth(),
-                                    verticalAlignment = Alignment.CenterVertically,
-                                    horizontalArrangement = Arrangement.SpaceBetween
-                                ) {
-                                    Row(verticalAlignment = Alignment.CenterVertically) {
-                                        Icon(
-                                            imageVector = Icons.Default.CheckCircle,
-                                            contentDescription = "Lock Open Icon",
-                                            tint = Color(0xFF10B981),
-                                            modifier = Modifier.size(20.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(8.dp))
-                                        Text(
-                                            text = "Parent Setting Config Active",
-                                            style = MaterialTheme.typography.bodyLarge.copy(
-                                                fontWeight = FontWeight.Bold,
-                                                color = Color.White
-                                            )
-                                        )
-                                    }
-
-                                    Button(
-                                        onClick = { viewModel.initiateSettingsLock() },
-                                        colors = ButtonDefaults.buttonColors(containerColor = Color(0xFFEF4444)),
-                                        shape = RoundedCornerShape(8.dp),
-                                        contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
-                                        modifier = Modifier.height(36.dp)
+                        // Settings lock notification banner
+                        if (!isSettingsLocked) {
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primaryContainer),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary)
+                            ) {
+                                Column(modifier = Modifier.padding(16.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
                                     ) {
-                                        Icon(
-                                            imageVector = Icons.Default.Lock,
-                                            contentDescription = "Lock settings",
-                                            modifier = Modifier.size(14.dp)
-                                        )
-                                        Spacer(modifier = Modifier.width(4.dp))
-                                        Text("Lock Now", fontSize = 12.sp)
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = Icons.Default.CheckCircle,
+                                                contentDescription = "Lock Open Icon",
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = "Settings Safeguard Unlocked",
+                                                style = MaterialTheme.typography.bodyLarge.copy(
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaterialTheme.colorScheme.onPrimaryContainer
+                                                )
+                                            )
+                                        }
+
+                                        Button(
+                                            onClick = { viewModel.initiateSettingsLock() },
+                                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                                            shape = RoundedCornerShape(8.dp),
+                                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                                            modifier = Modifier.height(36.dp)
+                                        ) {
+                                            Icon(
+                                                imageVector = Icons.Default.Lock,
+                                                contentDescription = "Lock settings",
+                                                modifier = Modifier.size(14.dp),
+                                                tint = MaterialTheme.colorScheme.onError
+                                            )
+                                            Spacer(modifier = Modifier.width(4.dp))
+                                            Text("Lock Now", fontSize = 12.sp, color = MaterialTheme.colorScheme.onError)
+                                        }
                                     }
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        text = "You are currently unlocked. Modify block rules freely. Click 'Lock Now' to re-engage safeguard armor.",
+                                        style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f))
+                                    )
                                 }
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(
-                                    text = "Make app selections to configure blocking policies. Once finished, click 'Lock Now' to protect configs.",
-                                    style = MaterialTheme.typography.bodySmall.copy(color = Color(0xFF94A3B8))
-                                )
+                            }
+                        } else {
+                            Card(
+                                modifier = Modifier.fillMaxWidth(),
+                                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.08f)),
+                                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.25f))
+                            ) {
+                                Column(modifier = Modifier.padding(16.dp)) {
+                                    Row(
+                                        modifier = Modifier.fillMaxWidth(),
+                                        verticalAlignment = Alignment.CenterVertically,
+                                        horizontalArrangement = Arrangement.SpaceBetween
+                                    ) {
+                                        Row(verticalAlignment = Alignment.CenterVertically) {
+                                            Icon(
+                                                imageVector = Icons.Default.Lock,
+                                                contentDescription = "Lock Closed Icon",
+                                                tint = MaterialTheme.colorScheme.primary,
+                                                modifier = Modifier.size(20.dp)
+                                            )
+                                            Spacer(modifier = Modifier.width(8.dp))
+                                            Text(
+                                                text = "Safeguard Shield Engaged",
+                                                style = MaterialTheme.typography.bodyLarge.copy(
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = MaterialTheme.colorScheme.primary
+                                                )
+                                            )
+                                        }
+                                    }
+                                    Spacer(modifier = Modifier.height(8.dp))
+                                    Text(
+                                        text = "Instant Shielding Active. You can block any social media or application IMMEDIATELY with 0 delay. Turning off restrictions is protected by your self-control delay of $chosenDelay Min(s).",
+                                        style = MaterialTheme.typography.bodySmall.copy(color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    )
+                                }
                             }
                         }
 
@@ -692,18 +890,18 @@ fun PermissionDashboardScreen(
                         OutlinedTextField(
                             value = searchQuery,
                             onValueChange = { searchQuery = it },
-                            placeholder = { Text("Search installed applications...", color = Color(0xFF64748B)) },
-                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search Icon", tint = Color(0xFF64748B)) },
+                            placeholder = { Text("Search installed applications...", color = MaterialTheme.colorScheme.onSurfaceVariant) },
+                            leadingIcon = { Icon(Icons.Default.Search, contentDescription = "Search Icon", tint = MaterialTheme.colorScheme.onSurfaceVariant) },
                             modifier = Modifier
                                 .fillMaxWidth()
                                 .testTag("app_search_field"),
                             colors = OutlinedTextFieldDefaults.colors(
-                                focusedTextColor = Color.White,
-                                unfocusedTextColor = Color.White,
-                                focusedContainerColor = Color(0xFF1E293B),
-                                unfocusedContainerColor = Color(0xFF1E293B),
-                                focusedBorderColor = Color(0xFF38BDF8),
-                                unfocusedBorderColor = Color(0xFF334155)
+                                focusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                unfocusedTextColor = MaterialTheme.colorScheme.onSurface,
+                                focusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                                unfocusedContainerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                                focusedBorderColor = MaterialTheme.colorScheme.primary,
+                                unfocusedBorderColor = MaterialTheme.colorScheme.outlineVariant
                             ),
                             shape = RoundedCornerShape(12.dp),
                             singleLine = true
@@ -715,7 +913,7 @@ fun PermissionDashboardScreen(
                                 fontWeight = FontWeight.Bold,
                                 letterSpacing = 1.sp
                             ),
-                            color = Color(0xFF64748B)
+                            color = MaterialTheme.colorScheme.primary
                         )
 
                         if (isAppsLoading) {
@@ -725,7 +923,7 @@ fun PermissionDashboardScreen(
                                     .weight(1f),
                                 contentAlignment = Alignment.Center
                             ) {
-                                CircularProgressIndicator(color = Color(0xFF38BDF8))
+                                CircularProgressIndicator(color = MaterialTheme.colorScheme.primary)
                             }
                         } else {
                             val filteredApps = appItems.filter {
@@ -743,13 +941,13 @@ fun PermissionDashboardScreen(
                                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                                         Text(
                                             text = "No applications resolved",
-                                            color = Color(0xFF64748B),
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                                             style = MaterialTheme.typography.bodyMedium
                                         )
                                         Spacer(modifier = Modifier.height(4.dp))
                                         Text(
                                             text = "Try typing another search keyword...",
-                                            color = Color(0xFF475569),
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
                                             fontSize = 12.sp
                                         )
                                     }
@@ -766,7 +964,20 @@ fun PermissionDashboardScreen(
                                         AppBlockingRow(
                                             appInfo = appInfo,
                                             onToggleBlock = { isBlocked ->
-                                                viewModel.toggleAppBlocked(appInfo.packageName, isBlocked)
+                                                if (isBlocked) {
+                                                    // Turning ON a block is INSTANT with absolutely 0 delay
+                                                    viewModel.toggleAppBlocked(appInfo.packageName, true)
+                                                    Toast.makeText(context, "${appInfo.appName} blocked instantly!", Toast.LENGTH_SHORT).show()
+                                                } else {
+                                                    // Turning OFF a block is protected by countdown if locked!
+                                                    if (!isSettingsLocked) {
+                                                        viewModel.toggleAppBlocked(appInfo.packageName, false)
+                                                        Toast.makeText(context, "${appInfo.appName} protection disabled.", Toast.LENGTH_SHORT).show()
+                                                    } else {
+                                                        blockToUnblock = appInfo
+                                                        showUnlockPrompt = true
+                                                    }
+                                                }
                                             }
                                         )
                                     }
@@ -890,141 +1101,68 @@ fun SettingsLockedScreen(
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .padding(24.dp),
         contentAlignment = Alignment.Center
     ) {
-        Column(
-            horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+        EmeraldCard(
+            modifier = Modifier.fillMaxWidth().widthIn(max = 480.dp)
         ) {
-            Box(
-                modifier = Modifier
-                    .size(72.dp)
-                    .background(Color(0xFF38BDF8).copy(alpha = 0.08f), RoundedCornerShape(20.dp)),
-                contentAlignment = Alignment.Center
+            Column(
+                modifier = Modifier.padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
             ) {
-                Icon(
-                    imageVector = Icons.Default.Lock,
-                    contentDescription = "Locked settings Icon",
-                    tint = Color(0xFF38BDF8),
-                    modifier = Modifier.size(36.dp)
-                )
-            }
-
-            Spacer(modifier = Modifier.height(24.dp))
-
-            Text(
-                text = "CONFIGURATION LOCKED",
-                fontSize = 11.sp,
-                fontWeight = FontWeight.Bold,
-                letterSpacing = 1.5.sp,
-                color = Color(0xFF38BDF8)
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "Parental Setup Shield",
-                style = MaterialTheme.typography.headlineSmall.copy(
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                ),
-                textAlign = TextAlign.Center
-            )
-
-            Spacer(modifier = Modifier.height(8.dp))
-
-            Text(
-                text = "To prevent impulsive bypasses or tamper edits, configuration edits require unlocking through a pre-configured self-control countdown delay.",
-                style = MaterialTheme.typography.bodyMedium.copy(
-                    color = Color(0xFF94A3B8),
-                    lineHeight = 20.sp
-                ),
-                textAlign = TextAlign.Center,
-                modifier = Modifier.padding(horizontal = 8.dp)
-            )
-
-            Spacer(modifier = Modifier.height(32.dp))
-
-            // Cool Delay chooser card
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)),
-                shape = RoundedCornerShape(16.dp),
-                border = BorderStroke(1.dp, Color(0xFF334155))
-            ) {
-                Column(modifier = Modifier.padding(16.dp)) {
-                    Text(
-                        text = "Choose Self-Control Delay Duration:",
-                        fontSize = 13.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color.White,
-                        modifier = Modifier.padding(bottom = 12.dp)
-                    )
-
-                    val delayOptions = listOf(1, 5, 10, 60)
-                    Row(
-                        modifier = Modifier.fillMaxWidth(),
-                        horizontalArrangement = Arrangement.spacedBy(8.dp)
-                    ) {
-                        delayOptions.forEach { mins ->
-                            val isSelected = chosenDelay == mins
-                            Box(
-                                modifier = Modifier
-                                    .weight(1f)
-                                    .background(
-                                        if (isSelected) Color(0xFF38BDF8) else Color(0xFF0F172A),
-                                        RoundedCornerShape(8.dp)
-                                    )
-                                    .border(
-                                        1.dp,
-                                        if (isSelected) Color(0xFF38BDF8) else Color(0xFF334155),
-                                        RoundedCornerShape(8.dp)
-                                    )
-                                    .clickable { onSelectDelay(mins) }
-                                    .padding(vertical = 10.dp),
-                                contentAlignment = Alignment.Center
-                            ) {
-                                Text(
-                                    text = if (mins == 1) "1 Min" else "$mins Min",
-                                    color = if (isSelected) Color(0xFF020617) else Color(0xFF94A3B8),
-                                    fontWeight = FontWeight.Bold,
-                                    fontSize = 12.sp
-                                )
-                            }
-                        }
-                    }
-                }
-            }
-
-            Spacer(modifier = Modifier.height(32.dp))
-
-            Button(
-                onClick = onInitiateUnlock,
-                colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF38BDF8),
-                    contentColor = Color(0xFF020617)
-                ),
-                shape = RoundedCornerShape(12.dp),
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .height(50.dp)
-                    .testTag("initiate_unlock_btn")
-            ) {
-                Row(
-                    verticalAlignment = Alignment.CenterVertically,
-                    horizontalArrangement = Arrangement.Center
+                Box(
+                    modifier = Modifier
+                        .size(72.dp)
+                        .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.12f), RoundedCornerShape(20.dp)),
+                    contentAlignment = Alignment.Center
                 ) {
                     Icon(
-                        imageVector = Icons.Default.Info,
-                        contentDescription = "Timer icon"
+                        imageVector = Icons.Default.Lock,
+                        contentDescription = "Locked settings Icon",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(36.dp)
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
-                    Text(
-                        text = "Start Unlocking Countdown (" + (if (chosenDelay == 1) "1 Min" else "$chosenDelay Mins") + ")",
-                        fontWeight = FontWeight.Bold,
-                        fontSize = 14.sp
-                    )
+                }
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                Text(
+                    text = "CONFIGURATION SECURED",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.5.sp,
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                Spacer(modifier = Modifier.height(8.dp))
+
+                Text(
+                    text = "Shield Lock Activated",
+                    style = MaterialTheme.typography.headlineSmall.copy(fontWeight = FontWeight.ExtraBold),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                Text(
+                    text = "Your digital parents settings are fortified. To access restrictions customizations or unblock apps, you must initiate a patience training delay first.",
+                    textAlign = TextAlign.Center,
+                    style = MaterialTheme.typography.bodyMedium,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                )
+
+                Spacer(modifier = Modifier.height(24.dp))
+
+                Button(
+                    onClick = onInitiateUnlock,
+                    modifier = Modifier.fillMaxWidth().height(48.dp),
+                    shape = RoundedCornerShape(12.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                ) {
+                    Text("START UNLOCK DELAY ($chosenDelay MINUTES)", fontWeight = FontWeight.Bold)
                 }
             }
         }
@@ -1034,57 +1172,103 @@ fun SettingsLockedScreen(
 @Composable
 fun CountdownDelayScreen(
     remainingMs: Long,
+    chosenDelay: Int,
     onBypass: () -> Unit
 ) {
-    val selfControlQuotes = listOf(
-        "\"A pause gives us space to evaluate before taking action. Delaying makes choices deliberate.\"",
-        "\"The core of all maturity is the ability to postpone immediate gratification.\"",
-        "\"Impulse is standard; patience represents the supreme height of human governance.\"",
-        "\"He who can delay can conquer any fortress of bad habit.\""
-    )
-    val randomQuote = remember(remainingMs > 0) { selfControlQuotes.random() }
-
-    val totalSeconds = (remainingMs + 999) / 1000
+    val totalSeconds = remainingMs / 1000
     val minutes = totalSeconds / 60
     val seconds = totalSeconds % 60
     val timeFormatted = String.format("%02d:%02d", minutes, seconds)
 
+    val totalDurationMs = chosenDelay * 60 * 1000L
+    val rawProgress = if (totalDurationMs > 0) remainingMs.toFloat() / totalDurationMs else 1f
+    val progressFraction = rawProgress.coerceIn(0f, 1f)
+
+    // Breathing Animation
+    val infiniteTransition = rememberInfiniteTransition(label = "serene_breath")
+    val scalePulse by infiniteTransition.animateFloat(
+        initialValue = 0.96f,
+        targetValue = 1.05f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1500, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulseScale"
+    )
+
+    val quotes = remember {
+        listOf(
+            "Indeed, God is with those who patiently endure (Sabr)." to "Quran 2:153",
+            "Patience is the beautiful key to tranquility." to "Islamic Wisdom",
+            "The greatest struggle is the struggle against one's own desires." to "Hadith",
+            "Patience is a solid pillar of faith." to "Ali ibn Abi Talib",
+            "Between stimulus and response there is a space, where we choose our response." to "Viktor Frankl",
+            "The strong controls himself in moments of urge." to "Hadith",
+            "Do not ruin a tranquil moment with urgency; patience is a virtue of focus." to "Sabr Wisdom",
+            "Calmness is the cradle of digital power." to "Josiah Gilbert Holland"
+        )
+    }
+
+    var quoteIndex by remember { mutableIntStateOf(0) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(8000) // Quote changes every 8 seconds
+            quoteIndex = (quoteIndex + 1) % quotes.size
+        }
+    }
+    val currentQuoteItem = quotes[quoteIndex % quotes.size]
+
+    val primaryColor = MaterialTheme.colorScheme.primary
+
     Box(
         modifier = Modifier
             .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
             .padding(24.dp),
         contentAlignment = Alignment.Center
     ) {
         Column(
             horizontalAlignment = Alignment.CenterHorizontally,
-            verticalArrangement = Arrangement.Center
+            verticalArrangement = Arrangement.Center,
+            modifier = Modifier.widthIn(max = 480.dp)
         ) {
-            // Circle delay indicator
             Box(
-                modifier = Modifier.size(160.dp),
+                modifier = Modifier.size(200.dp),
                 contentAlignment = Alignment.Center
             ) {
+                Canvas(modifier = Modifier.size(190.dp)) {
+                    drawCircle(
+                        color = primaryColor.copy(alpha = 0.08f),
+                        radius = size.minDimension / 2f
+                    )
+                    
+                    drawCircle(
+                        color = primaryColor.copy(alpha = 0.03f),
+                        radius = (size.minDimension / 2f) * scalePulse
+                    )
+                }
+
                 CircularProgressIndicator(
-                    progress = { remainingMs.toFloat() / (60 * 1000f) },
-                    modifier = Modifier.size(160.dp),
-                    color = Color(0xFFF59E0B), // Warm Orange
+                    progress = { progressFraction },
+                    modifier = Modifier.size(170.dp),
+                    color = primaryColor,
                     strokeWidth = 6.dp,
-                    trackColor = Color(0xFF1E293B)
+                    trackColor = MaterialTheme.colorScheme.surfaceVariant
                 )
 
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Icon(
                         imageVector = Icons.Default.Info,
-                        contentDescription = "Timer countdown",
-                        tint = Color(0xFFF59E0B),
-                        modifier = Modifier.size(32.dp)
+                        contentDescription = "Patience Dial Logo",
+                        tint = primaryColor,
+                        modifier = Modifier.size(34.dp)
                     )
-                    Spacer(modifier = Modifier.height(4.dp))
+                    Spacer(modifier = Modifier.height(6.dp))
                     Text(
                         text = timeFormatted,
                         style = MaterialTheme.typography.headlineMedium.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
+                            fontWeight = FontWeight.ExtraBold,
+                            color = MaterialTheme.colorScheme.onBackground
                         )
                     )
                 }
@@ -1093,69 +1277,47 @@ fun CountdownDelayScreen(
             Spacer(modifier = Modifier.height(32.dp))
 
             Text(
-                text = "UNLOCK DELAY ACTIVE",
-                fontSize = 12.sp,
+                text = "SABR GRATIFICATION DELAY ENABLED",
+                fontSize = 11.sp,
                 fontWeight = FontWeight.Bold,
-                letterSpacing = 1.5.sp,
-                color = Color(0xFFF59E0B)
+                letterSpacing = 1.6.sp,
+                color = primaryColor
             )
 
             Spacer(modifier = Modifier.height(8.dp))
 
             Text(
-                text = "Waiting to Access Settings",
+                text = "Cultivating Digital Patience",
                 style = MaterialTheme.typography.titleLarge.copy(
                     fontWeight = FontWeight.Bold,
-                    color = Color.White
+                    color = MaterialTheme.colorScheme.onBackground
                 )
             )
 
-            Spacer(modifier = Modifier.height(16.dp))
+            Spacer(modifier = Modifier.height(20.dp))
 
-            // Quote display
-            Card(
-                modifier = Modifier.fillMaxWidth(),
-                colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.04f)),
-                shape = RoundedCornerShape(12.dp)
-            ) {
-                Column(modifier = Modifier.padding(16.dp), horizontalAlignment = Alignment.CenterHorizontally) {
-                    Text(
-                        text = "SELF-CONTROL MINDSET",
-                        fontSize = 10.sp,
-                        fontWeight = FontWeight.Bold,
-                        color = Color(0xFF64748B),
-                        letterSpacing = 1.sp
-                    )
-                    Spacer(modifier = Modifier.height(8.dp))
-                    Text(
-                        text = randomQuote,
-                        style = MaterialTheme.typography.bodyMedium.copy(
-                            lineHeight = 20.sp,
-                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic
-                        ),
-                        color = Color(0xFFE2E8F0),
-                        textAlign = TextAlign.Center
-                    )
-                }
-            }
+            ReflectionCard(
+                quote = currentQuoteItem.first,
+                author = currentQuoteItem.second
+            )
 
             Spacer(modifier = Modifier.height(32.dp))
 
             Text(
-                text = "Keep this page open or wait in background. Edits will unlock automatically when countdown terminates.",
+                text = "Observe this quiet window or step away. Your protection shield configuration unlocks automatically when the countdown completes.",
                 fontSize = 12.sp,
-                color = Color(0xFF64748B),
+                color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.8f),
                 textAlign = TextAlign.Center,
                 lineHeight = 18.sp,
-                modifier = Modifier.padding(horizontal = 12.dp)
+                modifier = Modifier.padding(horizontal = 16.dp)
             )
 
             Spacer(modifier = Modifier.height(24.dp))
 
-            // Cheat bypass button inside the dev suite so reviewers can bypass instantly
             TextButton(
                 onClick = onBypass,
-                colors = ButtonDefaults.textButtonColors(contentColor = Color(0xFFEF4444))
+                colors = ButtonDefaults.textButtonColors(contentColor = MaterialTheme.colorScheme.error),
+                modifier = Modifier.testTag("dev_bypass_timer_btn")
             ) {
                 Text("Developer Bypass (Skip Timer)", fontWeight = FontWeight.Bold, fontSize = 12.sp)
             }
@@ -1164,40 +1326,56 @@ fun CountdownDelayScreen(
 }
 
 @Composable
-fun HeaderSection() {
+fun HeaderSection(
+    onOpenSettings: () -> Unit
+) {
     Row(
         modifier = Modifier
             .fillMaxWidth()
-            .padding(vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically
+            .testTag("header_section"),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.SpaceBetween
     ) {
-        Box(
-            modifier = Modifier
-                .size(48.dp)
-                .background(Color(0xFFE2E8F0).copy(alpha = 0.08f), RoundedCornerShape(12.dp)),
-            contentAlignment = Alignment.Center
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Box(
+                modifier = Modifier
+                    .size(48.dp)
+                    .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.1f), RoundedCornerShape(12.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Lock,
+                    contentDescription = "Shield Protection Icon",
+                    tint = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+            Spacer(modifier = Modifier.width(16.dp))
+            Column {
+                Text(
+                    text = "Digital Parent Core",
+                    style = MaterialTheme.typography.titleMedium.copy(
+                        fontWeight = FontWeight.Bold,
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                )
+                Text(
+                    text = "Emerald Safeguard Shield",
+                    style = MaterialTheme.typography.bodySmall.copy(
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                )
+            }
+        }
+
+        IconButton(
+            onClick = onOpenSettings,
+            modifier = Modifier.testTag("onboarding_settings_gear_btn")
         ) {
             Icon(
-                imageVector = Icons.Default.Lock,
-                contentDescription = "Shield Protection Icon",
-                tint = Color(0xFF38BDF8), // Light Blue
-                modifier = Modifier.size(24.dp)
-            )
-        }
-        Spacer(modifier = Modifier.width(16.dp))
-        Column {
-            Text(
-                text = "Digital Parent Core",
-                style = MaterialTheme.typography.headlineSmall.copy(
-                    fontWeight = FontWeight.Bold,
-                    color = Color.White
-                )
-            )
-            Text(
-                text = "Phase 1 & 2: Complete Controls",
-                style = MaterialTheme.typography.bodyMedium.copy(
-                    color = Color(0xFF94A3B8) // Slate 400
-                )
+                imageVector = Icons.Default.Settings,
+                contentDescription = "Theme and Security Settings",
+                tint = MaterialTheme.colorScheme.primary
             )
         }
     }
@@ -1209,13 +1387,10 @@ fun SafeSystemLogConsole(
     isServiceRunning: Boolean,
     currentPackageName: String
 ) {
-    Card(
-        modifier = Modifier.fillMaxWidth(),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E293B)), // Slate 800
-        shape = RoundedCornerShape(16.dp),
-        border = BorderStroke(1.dp, Color(0xFF334155)) // Slate 700
+    EmeraldCard(
+        modifier = Modifier.fillMaxWidth()
     ) {
-        Column(modifier = Modifier.padding(16.dp)) {
+        Column(modifier = Modifier.padding(20.dp)) {
             Row(
                 modifier = Modifier.fillMaxWidth(),
                 verticalAlignment = Alignment.CenterVertically,
@@ -1223,69 +1398,86 @@ fun SafeSystemLogConsole(
             ) {
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Icon(
-                        imageVector = Icons.Default.Settings,
-                        contentDescription = "Monitor Console Icon",
-                        tint = Color(0xFF38BDF8),
-                        modifier = Modifier.size(18.dp)
+                        imageVector = Icons.Default.Info,
+                        contentDescription = "Activity Feed",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
                     )
-                    Spacer(modifier = Modifier.width(8.dp))
+                    Spacer(modifier = Modifier.width(10.dp))
                     Text(
-                        text = "Real-Time Tracking Console",
-                        style = MaterialTheme.typography.bodyMedium.copy(
-                            fontWeight = FontWeight.Bold,
-                            color = Color.White
-                        )
+                        text = "Boundary Guardian Monitor",
+                        style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                 }
 
-                val statusColor = if (isAccessibilityActive && isServiceRunning) Color(0xFF10B981) else Color(0xFFF43F5E)
-                val statusText = if (isAccessibilityActive && isServiceRunning) "ACTIVE" else "OFF"
-
-                Box(
-                    modifier = Modifier
-                        .background(statusColor.copy(alpha = 0.15f), RoundedCornerShape(6.dp))
-                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                // Smooth monitor active green dot
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
                 ) {
-                    Text(
-                        text = statusText,
-                        style = MaterialTheme.typography.labelSmall.copy(
-                            fontWeight = FontWeight.Bold,
-                            letterSpacing = 0.5.sp
+                    val pulse = rememberInfiniteTransition(label = "pulse_green")
+                    val alphaScale by pulse.animateFloat(
+                        initialValue = 0.4f,
+                        targetValue = 1.0f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(1000, easing = LinearEasing),
+                            repeatMode = RepeatMode.Reverse
                         ),
-                        color = statusColor
+                        label = "pGreen"
+                    )
+
+                    val activeColor = Color(0xFF10B981)
+
+                    Box(
+                        modifier = Modifier
+                            .graphicsLayer { alpha = alphaScale }
+                            .size(8.dp)
+                            .background(
+                                color = if (isAccessibilityActive && isServiceRunning) activeColor else Color(0xFFEF4444),
+                                shape = RoundedCornerShape(50)
+                            )
+                    )
+                    Text(
+                        text = if (isAccessibilityActive && isServiceRunning) "SHIELD ACTIVE" else "MONITOR OFFLINE",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
+                        color = if (isAccessibilityActive && isServiceRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                        fontSize = 10.sp
                     )
                 }
             }
 
             Spacer(modifier = Modifier.height(14.dp))
 
-            Surface(
-                modifier = Modifier.fillMaxWidth(),
-                color = Color(0xFF0F172A), // Slate 900
-                shape = RoundedCornerShape(8.dp)
-            ) {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(12.dp)
-                ) {
-                    Text(
-                        text = "$ adb shell logs --follow",
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 11.sp,
-                        color = Color(0xFF64748B) // Slate 500
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .background(
+                        MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.3f),
+                        RoundedCornerShape(12.dp)
                     )
-                    Spacer(modifier = Modifier.height(6.dp))
+                    .border(
+                        1.dp,
+                        MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f),
+                        RoundedCornerShape(12.dp)
+                    )
+                    .padding(16.dp)
+            ) {
+                Column {
+                    Text(
+                        text = "EMERALD SAFEST WATCHER",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
                     Text(
                         text = if (isAccessibilityActive && isServiceRunning) {
-                            "Tracking foreground events...\nLast observed package:\n$currentPackageName"
+                            "The Emerald Guard engine is actively running real-time boundaries in the background to monitor digital wellness. Operating status is pristine."
                         } else {
-                            "Waiting for Custom Accessibility Service permissions to run background watcher..."
+                            "Please authorize 'Shield Guard (Accessibility)' permission to engage real-time self-control watch."
                         },
-                        fontFamily = FontFamily.Monospace,
-                        fontSize = 13.sp,
-                        color = if (isAccessibilityActive && isServiceRunning) Color(0xFF34D399) else Color(0xFF94A3B8),
-                        lineHeight = 18.sp
+                        style = MaterialTheme.typography.bodyMedium.copy(lineHeight = 20.sp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
                     )
                 }
             }
@@ -1301,8 +1493,8 @@ fun PermissionCard(
     testTag: String,
     onConfigure: () -> Unit
 ) {
-    val borderColor = if (isGranted) Color(0xFF10B981).copy(alpha = 0.4f) else Color(0xFFEF4444).copy(alpha = 0.3f)
-    val cardBackground = if (isGranted) Color(0xFF0F172A) else Color(0xFF1E293B)
+    val borderColor = if (isGranted) MaterialTheme.colorScheme.primary.copy(alpha = 0.4f) else MaterialTheme.colorScheme.error.copy(alpha = 0.3f)
+    val cardBackground = if (isGranted) MaterialTheme.colorScheme.surface else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)
 
     Card(
         modifier = Modifier
@@ -1325,14 +1517,14 @@ fun PermissionCard(
                         text = title,
                         style = MaterialTheme.typography.titleMedium.copy(
                             fontWeight = FontWeight.Bold,
-                            color = Color.White
+                            color = MaterialTheme.colorScheme.onSurface
                         )
                     )
                     Spacer(modifier = Modifier.height(6.dp))
                     Text(
                         text = description,
                         style = MaterialTheme.typography.bodyMedium.copy(
-                            color = Color(0xFF94A3B8), // Slate 400
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
                             lineHeight = 20.sp
                         )
                     )
@@ -1348,8 +1540,8 @@ fun PermissionCard(
             Button(
                 onClick = onConfigure,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isGranted) Color(0xFF334155) else Color(0xFFE2E8F0),
-                    contentColor = if (isGranted) Color.White else Color(0xFF0F172A)
+                    containerColor = if (isGranted) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.primary,
+                    contentColor = if (isGranted) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onPrimary
                 ),
                 shape = RoundedCornerShape(10.dp),
                 modifier = Modifier
@@ -1387,7 +1579,7 @@ fun PermissionCard(
 
 @Composable
 fun PermissionStatusBadge(isGranted: Boolean) {
-    val badgeColor = if (isGranted) Color(0xFF10B981) else Color(0xFFEF4444)
+    val badgeColor = if (isGranted) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error
     val label = if (isGranted) "Granted" else "Missing"
     val icon = if (isGranted) Icons.Default.CheckCircle else Icons.Default.Warning
 
@@ -1422,16 +1614,16 @@ fun OverlayTrialSection(
         modifier = Modifier
             .fillMaxWidth()
             .testTag("overlay_test_section"),
-        colors = CardDefaults.cardColors(containerColor = Color(0xFF1E1B4B)), // Dark Indigo 900
+        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.5f)),
         shape = RoundedCornerShape(16.dp),
-        border = BorderStroke(1.dp, Color(0xFF312E81)) // Indigo 800
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
     ) {
         Column(modifier = Modifier.padding(18.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Icon(
                     imageVector = Icons.Default.Lock,
                     contentDescription = "Lock overlay",
-                    tint = Color(0xFF818CF8),
+                    tint = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.size(20.dp)
                 )
                 Spacer(modifier = Modifier.width(8.dp))
@@ -1439,7 +1631,7 @@ fun OverlayTrialSection(
                     text = "Lockout Overlay Trial",
                     style = MaterialTheme.typography.titleMedium.copy(
                         fontWeight = FontWeight.Bold,
-                        color = Color.White
+                        color = MaterialTheme.colorScheme.onSurface
                     )
                 )
             }
@@ -1449,7 +1641,7 @@ fun OverlayTrialSection(
             Text(
                 text = "Experience a live simulation of a digital self-control lock window drawing directly on top of your current application view.",
                 style = MaterialTheme.typography.bodyMedium.copy(
-                    color = Color(0xFFC7D2FE), // Indigo 200
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
                     lineHeight = 20.sp
                 )
             )
@@ -1459,8 +1651,8 @@ fun OverlayTrialSection(
             Button(
                 onClick = onToggleOverlay,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFF4F46E5), // Indigo 600
-                    contentColor = Color.White
+                    containerColor = MaterialTheme.colorScheme.primary,
+                    contentColor = MaterialTheme.colorScheme.onPrimary
                 ),
                 shape = RoundedCornerShape(10.dp),
                 modifier = Modifier
@@ -1474,6 +1666,695 @@ fun OverlayTrialSection(
                     fontWeight = FontWeight.Bold,
                     fontSize = 14.sp
                 )
+            }
+        }
+    }
+}
+
+// Custom reusable Design System components
+@Composable
+fun EmeraldCard(
+    modifier: Modifier = Modifier,
+    border: BorderStroke? = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+    containerColor: Color = MaterialTheme.colorScheme.surface,
+    elevation: CardElevation = CardDefaults.cardElevation(defaultElevation = 2.dp),
+    shape: RoundedCornerShape = RoundedCornerShape(24.dp),
+    content: @Composable ColumnScope.() -> Unit
+) {
+    Card(
+        modifier = modifier,
+        border = border,
+        colors = CardDefaults.cardColors(containerColor = containerColor),
+        elevation = elevation,
+        shape = shape,
+        content = content
+    )
+}
+
+@Composable
+fun StatusCard(
+    isProtected: Boolean,
+    blockedCount: Int,
+    requiredPermissionsCount: Int,
+    onActivatePermissions: () -> Unit,
+    modifier: Modifier = Modifier
+) {
+    val infiniteTransition = rememberInfiniteTransition(label = "pulse_infinity")
+    val pulseScale by infiniteTransition.animateFloat(
+        initialValue = 0.98f,
+        targetValue = 1.05f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1400, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulseScale"
+    )
+    val pulseAlpha by infiniteTransition.animateFloat(
+        initialValue = 0.4f,
+        targetValue = 0.08f,
+        animationSpec = infiniteRepeatable(
+            animation = tween(1400, easing = FastOutSlowInEasing),
+            repeatMode = RepeatMode.Reverse
+        ),
+        label = "pulseAlpha"
+    )
+
+    val colorScheme = MaterialTheme.colorScheme
+
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(24.dp),
+        colors = CardDefaults.cardColors(
+            containerColor = if (isProtected) {
+                colorScheme.primaryContainer.copy(alpha = 0.15f)
+            } else {
+                colorScheme.errorContainer.copy(alpha = 0.12f)
+            }
+        ),
+        border = BorderStroke(
+            width = 1.5.dp,
+            color = if (isProtected) colorScheme.primary else colorScheme.error.copy(alpha = 0.8f)
+        )
+    ) {
+        Column(
+            modifier = Modifier.padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Box(
+                contentAlignment = Alignment.Center,
+                modifier = Modifier.size(90.dp)
+            ) {
+                Canvas(modifier = Modifier.size(90.dp)) {
+                    drawCircle(
+                        color = (if (isProtected) Color(0xFF0F5132) else Color(0xFFB02A37)).copy(alpha = pulseAlpha),
+                        radius = (size.minDimension / 2f) * pulseScale
+                    )
+                }
+
+                Box(
+                    modifier = Modifier
+                        .size(64.dp)
+                        .background(
+                            color = if (isProtected) colorScheme.primary else colorScheme.error,
+                            shape = RoundedCornerShape(20.dp)
+                        ),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = if (isProtected) Icons.Default.CheckCircle else Icons.Default.Warning,
+                        contentDescription = "Shield Status Indicator",
+                        tint = if (isProtected) colorScheme.onPrimary else colorScheme.onError,
+                        modifier = Modifier.size(32.dp)
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            Text(
+                text = if (isProtected) "EMERALD SHIELD ENGAGED" else "ARMOR RESTING (ACTION REQUIRED)",
+                style = MaterialTheme.typography.titleSmall.copy(
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 1.5.sp
+                ),
+                color = if (isProtected) colorScheme.primary else colorScheme.error
+            )
+
+            Spacer(modifier = Modifier.height(6.dp))
+
+            Text(
+                text = if (isProtected) {
+                    "Your mindful boundary is active. Turn off app rules with delayed reward cooling."
+                } else {
+                    "Permissions are not fully authorized yet! Secure your device boundaries now."
+                },
+                style = MaterialTheme.typography.bodyMedium,
+                color = colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center
+            )
+
+            Spacer(modifier = Modifier.height(18.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp)
+            ) {
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .background(
+                            colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                            RoundedCornerShape(12.dp)
+                        )
+                        .padding(12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "$blockedCount",
+                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
+                        color = colorScheme.primary
+                    )
+                    Text(
+                        text = "App Barriers",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colorScheme.onSurfaceVariant
+                    )
+                }
+
+                Column(
+                    modifier = Modifier
+                        .weight(1f)
+                        .background(
+                            colorScheme.surfaceVariant.copy(alpha = 0.4f),
+                            RoundedCornerShape(12.dp)
+                        )
+                        .padding(12.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally
+                ) {
+                    Text(
+                        text = "$requiredPermissionsCount/3",
+                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
+                        color = if (requiredPermissionsCount == 3) colorScheme.primary else colorScheme.error
+                    )
+                    Text(
+                        text = "Core Anchors",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+
+            if (requiredPermissionsCount < 3) {
+                Spacer(modifier = Modifier.height(16.dp))
+                Button(
+                    onClick = onActivatePermissions,
+                    colors = ButtonDefaults.buttonColors(
+                        containerColor = colorScheme.error,
+                        contentColor = colorScheme.onError
+                    ),
+                    shape = RoundedCornerShape(12.dp),
+                    modifier = Modifier.fillMaxWidth()
+                ) {
+                    Text("AUTHORIZE ACTIVE PROTECT", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ProtectionToggle(
+    checked: Boolean,
+    onCheckedChange: (Boolean) -> Unit,
+    modifier: Modifier = Modifier
+) {
+    Switch(
+        checked = checked,
+        onCheckedChange = onCheckedChange,
+        colors = SwitchDefaults.colors(
+            checkedThumbColor = MaterialTheme.colorScheme.onPrimary,
+            checkedTrackColor = MaterialTheme.colorScheme.primary,
+            uncheckedThumbColor = MaterialTheme.colorScheme.outline,
+            uncheckedTrackColor = MaterialTheme.colorScheme.surfaceVariant
+        ),
+        modifier = modifier
+    )
+}
+
+@Composable
+fun ReflectionCard(
+    quote: String,
+    author: String,
+    modifier: Modifier = Modifier
+) {
+    Card(
+        modifier = modifier.fillMaxWidth(),
+        colors = CardDefaults.cardColors(
+            containerColor = MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.08f)
+        ),
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.2f)),
+        shape = RoundedCornerShape(20.dp)
+    ) {
+        Column(
+            modifier = Modifier.padding(24.dp),
+            horizontalAlignment = Alignment.CenterHorizontally
+        ) {
+            Icon(
+                imageVector = Icons.Default.Info,
+                contentDescription = "Mindful wisdom",
+                tint = MaterialTheme.colorScheme.primary.copy(alpha = 0.8f),
+                modifier = Modifier.size(28.dp)
+            )
+            Spacer(modifier = Modifier.height(12.dp))
+            Text(
+                text = "“$quote”",
+                style = MaterialTheme.typography.bodyMedium.copy(
+                    lineHeight = 24.sp,
+                    fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
+                    textAlign = TextAlign.Center
+                ),
+                color = MaterialTheme.colorScheme.onSurface
+            )
+            Spacer(modifier = Modifier.height(8.dp))
+            Text(
+                text = "— $author",
+                style = MaterialTheme.typography.labelMedium.copy(
+                    fontWeight = FontWeight.Bold,
+                    letterSpacing = 0.5.sp
+                ),
+                color = MaterialTheme.colorScheme.primary
+            )
+        }
+    }
+}
+
+@Keep
+@Composable
+fun OnboardingSetupScreen(
+    onComplete: (Int) -> Unit
+) {
+    var step by remember { mutableIntStateOf(1) }
+    var selectedPurpose by remember { mutableStateOf<String?>(null) }
+    var selectedDelay by remember { mutableIntStateOf(10) } // Default choice 10 Min
+
+    val purposes = listOf(
+        "Reduce Mindless Doomscrolling" to "🧘",
+        "Maximize Deep Focus" to "⚡",
+        "Cherish More Family Bond" to "🕌",
+        "Cultivate Patient Sobr" to "🛡️"
+    )
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(MaterialTheme.colorScheme.background)
+            .padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 480.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.Center
+        ) {
+            when (step) {
+                1 -> { // Welcome Screen
+                    EmeraldCard(
+                        modifier = Modifier.fillMaxWidth()
+                    ) {
+                        Column(
+                            modifier = Modifier.padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            val infiniteTransition = rememberInfiniteTransition(label = "pulse")
+                            val pulseScale by infiniteTransition.animateFloat(
+                                initialValue = 0.95f,
+                                targetValue = 1.05f,
+                                animationSpec = infiniteRepeatable(
+                                    animation = tween(1200, easing = LinearOutSlowInEasing),
+                                    repeatMode = RepeatMode.Reverse
+                                ),
+                                label = "gPulse"
+                            )
+                            Box(
+                                modifier = Modifier
+                                    .size(80.dp)
+                                    .graphicsLayer {
+                                        scaleX = pulseScale
+                                        scaleY = pulseScale
+                                    }
+                                    .background(
+                                        MaterialTheme.colorScheme.primary.copy(alpha = 0.12f),
+                                        RoundedCornerShape(24.dp)
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = Icons.Default.Lock,
+                                    contentDescription = "Shield Guard Logo",
+                                    tint = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.size(40.dp)
+                                )
+                            }
+
+                            Text(
+                                text = "DIGITAL SERENITY SHIELD",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    letterSpacing = 1.5.sp
+                                )
+                            )
+
+                            Text(
+                                text = "Welcome to Emerald Safeguard",
+                                style = MaterialTheme.typography.headlineMedium.copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                ),
+                                textAlign = TextAlign.Center
+                            )
+
+                            Text(
+                                text = "An Islamic-inspired mindful delay armor that nurtures patience (Sabr) by introducing a thoughtful waiting loop when modifying restrictive apps or boundaries. No more impulsive app usage.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center,
+                                lineHeight = 22.sp
+                            )
+
+                            Spacer(modifier = Modifier.height(16.dp))
+
+                            Button(
+                                onClick = { step = 2 },
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .height(52.dp),
+                                shape = RoundedCornerShape(16.dp),
+                                colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                            ) {
+                                Row(
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.Center
+                                ) {
+                                    Text("COMMENCE EMERALD JOURNEY", fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
+                                    Spacer(modifier = Modifier.width(8.dp))
+                                    Icon(Icons.Default.ArrowForward, contentDescription = "Next")
+                                }
+                            }
+                        }
+                    }
+                }
+                2 -> { // Purpose Selection Screen
+                    EmeraldCard(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            Text(
+                                text = "STEP 2 OF 4: OUR INTENT",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    letterSpacing = 1.5.sp
+                                )
+                            )
+
+                            Text(
+                                text = "Why do you seek protection?",
+                                style = MaterialTheme.typography.headlineSmall.copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                ),
+                                textAlign = TextAlign.Center
+                            )
+
+                            Text(
+                                text = "Choose the core visual purpose which best guides your path toward digital focus and spiritual serenity.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center
+                            )
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            purposes.forEach { (label, emoji) ->
+                                val isSelected = selectedPurpose == label
+                                val cardBg = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                                val borderStr = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(cardBg, RoundedCornerShape(14.dp))
+                                        .border(borderStr, RoundedCornerShape(14.dp))
+                                        .clickable { selectedPurpose = label }
+                                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(text = "$emoji  ", style = MaterialTheme.typography.titleMedium)
+                                        Text(
+                                            text = label,
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                                            color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                    RadioButton(
+                                        selected = isSelected,
+                                        onClick = { selectedPurpose = label },
+                                        colors = RadioButtonDefaults.colors(selectedColor = MaterialTheme.colorScheme.primary)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = { step = 1 },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(48.dp),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Text("Back", fontWeight = FontWeight.Bold)
+                                }
+
+                                Button(
+                                    onClick = { step = 3 },
+                                    enabled = selectedPurpose != null,
+                                    modifier = Modifier
+                                        .weight(1.5f)
+                                        .height(48.dp),
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text("Continue", fontWeight = FontWeight.Bold)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Icon(Icons.Default.ArrowForward, contentDescription = "Next")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                3 -> { // Delay Selection
+                    EmeraldCard(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(16.dp)
+                        ) {
+                            Text(
+                                text = "STEP 3 OF 4: PATIENCE BUFFER",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    letterSpacing = 1.5.sp
+                                )
+                            )
+
+                            Text(
+                                text = "Choose Your Mindful Delay",
+                                style = MaterialTheme.typography.headlineSmall.copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                ),
+                                textAlign = TextAlign.Center
+                            )
+
+                            Text(
+                                text = "To undo app barriers, you must wait through this cooling period. This rewires dopamine loops and promotes spiritual Sabr. Note: Choose wisely; this is a permanent setting.",
+                                style = MaterialTheme.typography.bodyMedium,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center
+                            )
+
+                            Spacer(modifier = Modifier.height(8.dp))
+
+                            val options = listOf(
+                                Triple(1, "1 Minute Delay", "⏱️"),
+                                Triple(5, "5 Minutes Delay", "⏳"),
+                                Triple(10, "10 Minutes Delay", "🛡️"),
+                                Triple(60, "60 Minutes Delay", "🔋")
+                            )
+
+                            options.forEach { (mins, label, emoji) ->
+                                val isSelected = selectedDelay == mins
+                                val cardBg = if (isSelected) MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.5f) else MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)
+                                val borderStr = if (isSelected) BorderStroke(1.5.dp, MaterialTheme.colorScheme.primary) else BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+
+                                Row(
+                                    modifier = Modifier
+                                        .fillMaxWidth()
+                                        .background(cardBg, RoundedCornerShape(14.dp))
+                                        .border(borderStr, RoundedCornerShape(14.dp))
+                                        .clickable { selectedDelay = mins }
+                                        .padding(horizontal = 16.dp, vertical = 12.dp),
+                                    verticalAlignment = Alignment.CenterVertically,
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text(text = "$emoji  ", style = MaterialTheme.typography.titleMedium)
+                                        Text(
+                                            text = label,
+                                            style = MaterialTheme.typography.bodyMedium.copy(fontWeight = FontWeight.Bold),
+                                            color = if (isSelected) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+                                        )
+                                    }
+                                    RadioButton(
+                                        selected = isSelected,
+                                        onClick = { selectedDelay = mins },
+                                        colors = RadioButtonDefaults.colors(selectedColor = MaterialTheme.colorScheme.primary)
+                                    )
+                                }
+                            }
+
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = { step = 2 },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(48.dp),
+                                    shape = RoundedCornerShape(12.dp)
+                                ) {
+                                    Text("Back", fontWeight = FontWeight.Bold)
+                                }
+
+                                Button(
+                                    onClick = { step = 4 },
+                                    modifier = Modifier
+                                        .weight(1.5f)
+                                        .height(48.dp),
+                                    shape = RoundedCornerShape(12.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                                ) {
+                                    Row(verticalAlignment = Alignment.CenterVertically) {
+                                        Text("Continue", fontWeight = FontWeight.Bold)
+                                        Spacer(modifier = Modifier.width(6.dp))
+                                        Icon(Icons.Default.ArrowForward, contentDescription = "Next")
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                4 -> { // Protection Setup Summary
+                    EmeraldCard(modifier = Modifier.fillMaxWidth()) {
+                        Column(
+                            modifier = Modifier.padding(24.dp),
+                            horizontalAlignment = Alignment.CenterHorizontally,
+                            verticalArrangement = Arrangement.spacedBy(14.dp)
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.CheckCircle,
+                                contentDescription = "Approved Summary Icon",
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(56.dp)
+                            )
+
+                            Text(
+                                text = "COMPLETE SETUP SUMMARY",
+                                style = MaterialTheme.typography.titleSmall.copy(
+                                    fontWeight = FontWeight.Bold,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    letterSpacing = 1.5.sp
+                                )
+                            )
+
+                            Text(
+                                text = "Establish Core Safeguards",
+                                style = MaterialTheme.typography.headlineSmall.copy(
+                                    fontWeight = FontWeight.ExtraBold,
+                                    color = MaterialTheme.colorScheme.onSurface
+                                ),
+                                textAlign = TextAlign.Center
+                            )
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                            Column(
+                                modifier = Modifier.fillMaxWidth(),
+                                verticalArrangement = Arrangement.spacedBy(10.dp)
+                            ) {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("Delay Duration:", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("$selectedDelay Minutes", fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary)
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("Visual Purpose:", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text(selectedPurpose ?: "None Selection", fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.onSurface)
+                                }
+
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween
+                                ) {
+                                    Text("Armor Shielding:", fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                    Text("Armed Immediately", fontWeight = FontWeight.ExtraBold, color = MaterialTheme.colorScheme.primary)
+                                }
+                            }
+
+                            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+
+                            Text(
+                                text = "By clicking below, you acknowledge that delayed gratification is an act of spiritual discipline (Sabr). Turning off restrictions inside the settings will enforce this wait timer. There are no bypasses.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                textAlign = TextAlign.Center
+                            )
+
+                            Spacer(modifier = Modifier.height(14.dp))
+
+                            Row(
+                                modifier = Modifier.fillMaxWidth(),
+                                horizontalArrangement = Arrangement.spacedBy(12.dp)
+                            ) {
+                                OutlinedButton(
+                                    onClick = { step = 3 },
+                                    modifier = Modifier
+                                        .weight(1f)
+                                        .height(50.dp),
+                                    shape = RoundedCornerShape(14.dp)
+                                ) {
+                                    Text("Back", fontWeight = FontWeight.Bold)
+                                }
+
+                                Button(
+                                    onClick = { onComplete(selectedDelay) },
+                                    modifier = Modifier
+                                        .weight(1.5f)
+                                        .height(50.dp),
+                                    shape = RoundedCornerShape(14.dp),
+                                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary)
+                                ) {
+                                    Text("ACTIVATE EMERALD GUARD", fontWeight = FontWeight.Bold, letterSpacing = 0.5.sp)
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }

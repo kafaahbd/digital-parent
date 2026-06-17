@@ -12,27 +12,49 @@ import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 
 private val DarkColorScheme = darkColorScheme(
-    primary = ForestGreenDark,
-    secondary = MintAccentDark,
-    tertiary = MintAccentDark,
-    background = BackgroundDark,
-    surface = SurfaceDark,
-    onPrimary = Color(0xFF03140C),
-    onSecondary = Color(0xFF03140C),
-    onBackground = OnBackgroundDark,
-    onSurface = OnBackgroundDark
+    primary = EmeraldPrimaryDark,
+    onPrimary = EmeraldOnPrimaryDark,
+    primaryContainer = EmeraldPrimaryContainerDark,
+    onPrimaryContainer = EmeraldOnPrimaryContainerDark,
+    secondary = EmeraldSecondaryDark,
+    onSecondary = EmeraldOnSecondaryDark,
+    secondaryContainer = EmeraldSecondaryContainerDark,
+    tertiary = EmeraldPrimaryDark,
+    background = EmeraldBackgroundDark,
+    onBackground = EmeraldOnBackgroundDark,
+    surface = EmeraldSurfaceDark,
+    onSurface = EmeraldOnSurfaceDark,
+    surfaceVariant = EmeraldSurfaceVariantDark,
+    onSurfaceVariant = EmeraldOnSurfaceVariantDark,
+    outline = EmeraldOutlineDark,
+    outlineVariant = EmeraldOutlineVariantDark,
+    error = EmeraldErrorDark,
+    onError = EmeraldOnErrorDark,
+    errorContainer = EmeraldErrorContainerDark,
+    onErrorContainer = EmeraldOnErrorContainerDark
 )
 
 private val LightColorScheme = lightColorScheme(
-    primary = ForestGreenLight,
-    secondary = MintAccentLight,
-    tertiary = MintAccentLight,
-    background = BackgroundLight,
-    surface = SurfaceLight,
-    onPrimary = Color.White,
-    onSecondary = Color.White,
-    onBackground = OnBackgroundLight,
-    onSurface = OnBackgroundLight
+    primary = EmeraldPrimaryLight,
+    onPrimary = EmeraldOnPrimaryLight,
+    primaryContainer = EmeraldPrimaryContainerLight,
+    onPrimaryContainer = EmeraldOnPrimaryContainerLight,
+    secondary = EmeraldSecondaryLight,
+    onSecondary = EmeraldOnSecondaryLight,
+    secondaryContainer = EmeraldSecondaryContainerLight,
+    tertiary = EmeraldSecondaryLight,
+    background = EmeraldBackgroundLight,
+    onBackground = EmeraldOnBackgroundLight,
+    surface = EmeraldSurfaceLight,
+    onSurface = EmeraldOnSurfaceLight,
+    surfaceVariant = EmeraldSurfaceVariantLight,
+    onSurfaceVariant = EmeraldOnSurfaceVariantLight,
+    outline = EmeraldOutlineLight,
+    outlineVariant = EmeraldOutlineVariantLight,
+    error = EmeraldErrorLight,
+    onError = EmeraldOnErrorLight,
+    errorContainer = EmeraldErrorContainerLight,
+    onErrorContainer = EmeraldOnErrorContainerLight
 )
 
 @Composable
