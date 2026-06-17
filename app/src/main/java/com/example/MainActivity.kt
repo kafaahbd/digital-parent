@@ -207,6 +207,11 @@ class MainViewModel : ViewModel() {
     private val _permissionsState = MutableStateFlow(PermissionsState())
     val permissionsState: StateFlow<PermissionsState> = _permissionsState.asStateFlow()
 
+    private val _healthState = MutableStateFlow(ProtectionHealthState(false, false, false, false))
+    val healthState: StateFlow<ProtectionHealthState> = _healthState.asStateFlow()
+
+    private var healthRepository: ProtectionHealthRepository? = null
+
     // Installed apps
     private val _appItems = MutableStateFlow<List<AppInfoItem>>(emptyList())
     val appItems: StateFlow<List<AppInfoItem>> = _appItems.asStateFlow()
@@ -249,6 +254,19 @@ class MainViewModel : ViewModel() {
             viewModelScope.launch {
                 repository!!.allBlockedApps.collect { dbList ->
                     loadInstalledApps(appCtx, dbList)
+                }
+            }
+        }
+        if (healthRepository == null) {
+            healthRepository = ProtectionHealthRepository.getInstance(appCtx)
+            viewModelScope.launch {
+                healthRepository!!.healthState.collect { hState ->
+                    _healthState.value = hState
+                    _permissionsState.value = PermissionsState(
+                        isAccessibilityGranted = hState.isAccessibilityEnabled,
+                        isDeviceAdminGranted = hState.isDeviceAdminEnabled,
+                        isOverlayGranted = hState.isOverlayEnabled
+                    )
                 }
             }
         }
@@ -297,27 +315,11 @@ class MainViewModel : ViewModel() {
     }
 
     fun checkPermissions(context: Context) {
-        val accessibilityComp = ComponentName(context, DigitalParentAccessibilityService::class.java)
-        val enabledServices = Settings.Secure.getString(
-            context.contentResolver,
-            Settings.Secure.ENABLED_ACCESSIBILITY_SERVICES
-        ) ?: ""
-        val isAccessibilityGranted = enabledServices.split(':').any {
-            val component = ComponentName.unflattenFromString(it)
-            component != null && component == accessibilityComp
+        val appCtx = context.applicationContext
+        if (healthRepository == null) {
+            healthRepository = ProtectionHealthRepository.getInstance(appCtx)
         }
-
-        val dpm = context.getSystemService(Context.DEVICE_POLICY_SERVICE) as DevicePolicyManager
-        val adminComponent = ComponentName(context, DeviceAdminComponent::class.java)
-        val isDeviceAdminGranted = dpm.isAdminActive(adminComponent)
-
-        val isOverlayGranted = Settings.canDrawOverlays(context)
-
-        _permissionsState.value = PermissionsState(
-            isAccessibilityGranted = isAccessibilityGranted,
-            isDeviceAdminGranted = isDeviceAdminGranted,
-            isOverlayGranted = isOverlayGranted
-        )
+        healthRepository?.refreshAll()
     }
 
     private fun loadInstalledApps(context: Context, blockedApps: List<BlockedAppEntity>) {
@@ -467,6 +469,7 @@ fun PermissionDashboardScreen(
     val lifecycleOwner = LocalLifecycleOwner.current
     
     val state by viewModel.permissionsState.collectAsStateWithLifecycle()
+    val healthState by viewModel.healthState.collectAsStateWithLifecycle()
     val appItems by viewModel.appItems.collectAsStateWithLifecycle()
     val isAppsLoading by viewModel.isAppsLoading.collectAsStateWithLifecycle()
     val isSettingsLocked by viewModel.isSettingsLocked.collectAsStateWithLifecycle()
@@ -476,6 +479,9 @@ fun PermissionDashboardScreen(
 
     val currentApp by DigitalParentAccessibilityService.foregroundApp.collectAsStateWithLifecycle()
     val isAccessibilityServiceConnected by DigitalParentAccessibilityService.isServiceRunning.collectAsStateWithLifecycle()
+    val currentPackageName by DigitalParentAccessibilityService.currentPackageName.collectAsStateWithLifecycle()
+    val currentAppName by DigitalParentAccessibilityService.currentAppName.collectAsStateWithLifecycle()
+    val isCurrentAppIgnored by DigitalParentAccessibilityService.isCurrentAppIgnored.collectAsStateWithLifecycle()
 
     var searchQuery by remember { mutableStateOf("") }
     var selectedTab by remember { mutableIntStateOf(0) } // 0 = Safeguard Center, 1 = Live Settings Config
@@ -511,6 +517,8 @@ fun PermissionDashboardScreen(
         )
         return
     }
+
+
 
     // --- COOLDOWN BLOCKOVERLAY (UN-BYPASSABLE FOREGROUND LOCK) ---
     if (remainingTimeMs > 0) {
@@ -709,10 +717,11 @@ fun PermissionDashboardScreen(
                         }
 
                         item {
-                            SafeSystemLogConsole(
-                                isAccessibilityActive = state.isAccessibilityGranted,
+                            LiveCurrentAppCard(
                                 isServiceRunning = isAccessibilityServiceConnected,
-                                currentPackageName = currentApp
+                                packageName = currentPackageName,
+                                appName = currentAppName,
+                                isIgnored = isCurrentAppIgnored
                             )
                         }
 
@@ -2359,3 +2368,412 @@ fun OnboardingSetupScreen(
         }
     }
 }
+
+@Composable
+fun ProtectionRecoveryScreen(
+    healthState: com.example.ProtectionHealthState,
+    onNavigateAccessibility: () -> Unit,
+    onNavigateOverlay: () -> Unit,
+    onNavigateDeviceAdmin: () -> Unit,
+    onRefresh: () -> Unit
+) {
+    val colorScheme = MaterialTheme.colorScheme
+
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(colorScheme.background)
+            .padding(24.dp),
+        contentAlignment = Alignment.Center
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .widthIn(max = 500.dp),
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(16.dp)
+        ) {
+            // Header Shield Icon
+            Box(
+                modifier = Modifier
+                    .size(80.dp)
+                    .background(colorScheme.errorContainer.copy(alpha = 0.2f), RoundedCornerShape(24.dp)),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = Icons.Default.Warning,
+                    contentDescription = "Shield Compromised",
+                    tint = colorScheme.error,
+                    modifier = Modifier.size(44.dp)
+                )
+            }
+
+            Text(
+                text = "GUARDIAN ENGINE SUSPENDED",
+                style = MaterialTheme.typography.titleSmall.copy(
+                    fontWeight = FontWeight.Bold,
+                    color = colorScheme.error,
+                    letterSpacing = 2.sp
+                )
+            )
+
+            Text(
+                text = "Fortification Shield Offline",
+                style = MaterialTheme.typography.headlineMedium.copy(
+                    fontWeight = FontWeight.ExtraBold,
+                    color = colorScheme.onBackground
+                ),
+                textAlign = TextAlign.Center
+            )
+
+            Text(
+                text = "To maintain your self-control guard, all three system pillars must remain active. We detected that one or more vital anchors were turned off.",
+                style = MaterialTheme.typography.bodyMedium,
+                color = colorScheme.onSurfaceVariant,
+                textAlign = TextAlign.Center,
+                lineHeight = 22.sp
+            )
+
+            Spacer(modifier = Modifier.height(8.dp))
+
+            // Pillar 1: Accessibility
+            PermissionPillarCard(
+                title = "Accessibility Guard Service",
+                description = "Monitors active foreground apps in order to intercept and prevent access to chosen blocked restrictions.",
+                isGranted = healthState.isAccessibilityEnabled,
+                onGrantClick = onNavigateAccessibility
+            )
+
+            // Pillar 2: Overlay
+            PermissionPillarCard(
+                title = "Overlay Drawing Armor",
+                description = "Permits the app to draw the secure containment screen on top of blocked applications.",
+                isGranted = healthState.isOverlayEnabled,
+                onGrantClick = onNavigateOverlay
+            )
+
+            // Pillar 3: Device Admin
+            PermissionPillarCard(
+                title = "System Level Device Admin",
+                description = "Provides parental/system protection to shield this app against bypass modifications or tampering.",
+                isGranted = healthState.isDeviceAdminEnabled,
+                onGrantClick = onNavigateDeviceAdmin
+            )
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Button(
+                onClick = onRefresh,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .height(48.dp),
+                shape = RoundedCornerShape(12.dp),
+                colors = ButtonDefaults.buttonColors(containerColor = colorScheme.primary)
+            ) {
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.Center
+                ) {
+                    Icon(imageVector = Icons.Default.Refresh, contentDescription = "Refresh Icon")
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("REVALIDATE HEALTH ANCHORS", fontWeight = FontWeight.Bold)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun PermissionPillarCard(
+    title: String,
+    description: String,
+    isGranted: Boolean,
+    onGrantClick: () -> Unit
+) {
+    val colorScheme = MaterialTheme.colorScheme
+    val cardBg = if (isGranted) colorScheme.primaryContainer.copy(alpha = 0.08f) else colorScheme.surfaceVariant.copy(alpha = 0.4f)
+    val borderStr = if (isGranted) BorderStroke(1.dp, colorScheme.primary.copy(alpha = 0.3f)) else BorderStroke(1.dp, colorScheme.outlineVariant)
+
+    Card(
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(16.dp),
+        colors = CardDefaults.cardColors(containerColor = cardBg),
+        border = borderStr
+    ) {
+        Row(
+            modifier = Modifier
+                .fillMaxWidth()
+                .padding(16.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(12.dp)
+        ) {
+            Box(
+                modifier = Modifier
+                    .size(40.dp)
+                    .background(
+                        color = if (isGranted) colorScheme.primary.copy(alpha = 0.12f) else colorScheme.error.copy(alpha = 0.12f),
+                        shape = RoundedCornerShape(12.dp)
+                    ),
+                contentAlignment = Alignment.Center
+            ) {
+                Icon(
+                    imageVector = if (isGranted) Icons.Default.CheckCircle else Icons.Default.Warning,
+                    contentDescription = if (isGranted) "Pillar Active" else "Pillar Suspended",
+                    tint = if (isGranted) colorScheme.primary else colorScheme.error,
+                    modifier = Modifier.size(24.dp)
+                )
+            }
+
+            Column(
+                modifier = Modifier.weight(1f)
+            ) {
+                Text(
+                    text = title,
+                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                    color = colorScheme.onSurface
+                )
+                Spacer(modifier = Modifier.height(2.dp))
+                Text(
+                    text = description,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = colorScheme.onSurfaceVariant,
+                    lineHeight = 16.sp
+                )
+            }
+
+            if (!isGranted) {
+                Button(
+                    onClick = onGrantClick,
+                    shape = RoundedCornerShape(8.dp),
+                    contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                    colors = ButtonDefaults.buttonColors(containerColor = colorScheme.error),
+                    modifier = Modifier.defaultMinSize(minWidth = 1.dp, minHeight = 1.dp)
+                ) {
+                    Text("AUTHORIZE", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = colorScheme.onError)
+                }
+            } else {
+                Text(
+                    text = "ACTIVE",
+                    fontSize = 11.sp,
+                    fontWeight = FontWeight.ExtraBold,
+                    color = colorScheme.primary,
+                    modifier = Modifier.padding(horizontal = 8.dp)
+                )
+            }
+        }
+    }
+}
+
+// Custom view to render App Icon cleanly in Jetpack Compose
+@Composable
+fun AppIconImage(packageName: String, modifier: Modifier = Modifier) {
+    androidx.compose.ui.viewinterop.AndroidView(
+        factory = { ctx ->
+            android.widget.ImageView(ctx).apply {
+                scaleType = android.widget.ImageView.ScaleType.FIT_CENTER
+            }
+        },
+        update = { imageView ->
+            try {
+                val icon = imageView.context.packageManager.getApplicationIcon(packageName)
+                imageView.setImageDrawable(icon)
+            } catch (e: Exception) {
+                imageView.setImageResource(android.R.drawable.sym_def_app_icon)
+            }
+        },
+        modifier = modifier
+    )
+}
+
+// High-fidelity Live Current App Card matching the Emerald theme guidelines
+@Composable
+fun LiveCurrentAppCard(
+    isServiceRunning: Boolean,
+    packageName: String,
+    appName: String,
+    isIgnored: Boolean
+) {
+    EmeraldCard(
+        modifier = Modifier
+            .fillMaxWidth()
+            .testTag("live_current_app_card")
+    ) {
+        Column(modifier = Modifier.padding(20.dp)) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.PlayArrow,
+                        contentDescription = "Active Indicator",
+                        tint = MaterialTheme.colorScheme.primary,
+                        modifier = Modifier.size(20.dp)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Text(
+                        text = "LIVE SHIELD MONITOR",
+                        style = MaterialTheme.typography.titleMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.sp
+                        ),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+
+                // Smooth monitor active green dot
+                Row(
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.spacedBy(4.dp)
+                ) {
+                    val pulse = rememberInfiniteTransition(label = "pulse_live")
+                    val alphaScale by pulse.animateFloat(
+                        initialValue = 0.4f,
+                        targetValue = 1.0f,
+                        animationSpec = infiniteRepeatable(
+                            animation = tween(1000, easing = LinearEasing),
+                            repeatMode = RepeatMode.Reverse
+                        ),
+                        label = "pLive"
+                    )
+
+                    val activeColor = Color(0xFF10B981)
+
+                    Box(
+                        modifier = Modifier
+                            .graphicsLayer { alpha = alphaScale }
+                            .size(10.dp)
+                            .background(
+                                color = if (isServiceRunning) activeColor else Color(0xFFEF4444),
+                                shape = RoundedCornerShape(50)
+                            )
+                    )
+                    Text(
+                        text = if (isServiceRunning) "RUNNING" else "OFFLINE",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.ExtraBold),
+                        color = if (isServiceRunning) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                        fontSize = 11.sp
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(16.dp))
+
+            if (!isServiceRunning) {
+                Box(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .background(
+                            MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.15f),
+                            RoundedCornerShape(12.dp)
+                        )
+                        .border(
+                            1.dp,
+                            MaterialTheme.colorScheme.error.copy(alpha = 0.3f),
+                            RoundedCornerShape(12.dp)
+                        )
+                        .padding(16.dp)
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(12.dp)
+                    ) {
+                        Icon(
+                            imageVector = Icons.Default.Warning,
+                            contentDescription = "Warning",
+                            tint = MaterialTheme.colorScheme.error,
+                            modifier = Modifier.size(28.dp)
+                        )
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = "ACCESSIBILITY SERVICE OFFLINE",
+                                style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold),
+                                color = MaterialTheme.colorScheme.error
+                            )
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = "Enable the Accessibility Service below to begin live scanning and secure blocked apps.",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+            } else {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    shape = RoundedCornerShape(16.dp),
+                    colors = CardDefaults.cardColors(
+                        containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.4f)
+                    ),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f))
+                ) {
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(16.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
+                        // Dynamically loaded App launcher Icon
+                        Box(
+                            modifier = Modifier
+                                .size(48.dp)
+                                .background(
+                                    MaterialTheme.colorScheme.background,
+                                    RoundedCornerShape(12.dp)
+                                )
+                                .padding(6.dp),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            AppIconImage(
+                                packageName = packageName,
+                                modifier = Modifier.fillMaxSize()
+                            )
+                        }
+
+                        Column(modifier = Modifier.weight(1f)) {
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                            ) {
+                                Text(
+                                    text = if (appName.isNotBlank() && appName != "None") appName else "Scan Pending...",
+                                    style = MaterialTheme.typography.titleMedium.copy(fontWeight = FontWeight.Bold),
+                                    color = MaterialTheme.colorScheme.onSurface
+                                )
+                                if (isIgnored && packageName != "None" && packageName.isNotBlank()) {
+                                    Box(
+                                        modifier = Modifier
+                                            .background(
+                                                MaterialTheme.colorScheme.primary.copy(alpha = 0.15f),
+                                                RoundedCornerShape(6.dp)
+                                            )
+                                            .padding(horizontal = 6.dp, vertical = 2.dp)
+                                    ) {
+                                        Text(
+                                            text = "SYSTEM SAFE",
+                                            fontSize = 9.sp,
+                                            fontWeight = FontWeight.Bold,
+                                            color = MaterialTheme.colorScheme.primary
+                                        )
+                                    }
+                                }
+                            }
+                            Spacer(modifier = Modifier.height(2.dp))
+                            Text(
+                                text = if (packageName.isNotBlank()) packageName else "Awaiting foreground event",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+

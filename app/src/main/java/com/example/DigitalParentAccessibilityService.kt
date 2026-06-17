@@ -35,9 +35,68 @@ class DigitalParentAccessibilityService : AccessibilityService() {
     private var premiumOverlayView: FrameLayout? = null
     private var currentOverlayPackage: String? = null
 
+    private val launcherPackages = mutableSetOf<String>()
+
+    private fun loadLauncherPackages() {
+        try {
+            val intent = Intent(Intent.ACTION_MAIN).apply {
+                addCategory(Intent.CATEGORY_HOME)
+            }
+            val pm = packageManager
+            val list = pm.queryIntentActivities(intent, 0)
+            synchronized(launcherPackages) {
+                launcherPackages.clear()
+                for (info in list) {
+                    launcherPackages.add(info.activityInfo.packageName)
+                }
+            }
+            Log.d("DigitalParentAccess", "Loaded launcher packages: $launcherPackages")
+        } catch (e: Exception) {
+            Log.e("DigitalParentAccess", "Error loading launcher packages", e)
+        }
+    }
+
+    private fun isIgnoredPackage(packageName: String): Boolean {
+        if (packageName == this.packageName) return true
+        
+        // Android system packages and permission controller packages
+        if (packageName == "android" ||
+            packageName.startsWith("com.android.systemui") ||
+            packageName.startsWith("com.android.settings") ||
+            packageName.startsWith("com.android.permissioncontroller") ||
+            packageName.startsWith("com.google.android.permissioncontroller") ||
+            packageName.startsWith("com.android.packageinstaller") ||
+            packageName.startsWith("com.google.android.packageinstaller") ||
+            packageName.startsWith("com.google.android.inputmethod")
+        ) {
+            return true
+        }
+        
+        // Check Launcher packages
+        synchronized(launcherPackages) {
+            if (launcherPackages.contains(packageName)) {
+                return true
+            }
+        }
+        
+        // Additional generic System packages check (FLAG_SYSTEM)
+        try {
+            val appInfo = packageManager.getApplicationInfo(packageName, 0)
+            val isSystem = (appInfo.flags and android.content.pm.ApplicationInfo.FLAG_SYSTEM) != 0
+            if (isSystem) {
+                return true
+            }
+        } catch (e: Exception) {
+            // ignore
+        }
+        
+        return false
+    }
+
     override fun onCreate() {
         super.onCreate()
         repository = BlockedAppRepository(this)
+        loadLauncherPackages()
         
         // Reactively collect the list of blocked app packages from Room
         serviceScope.launch {
@@ -63,18 +122,27 @@ class DigitalParentAccessibilityService : AccessibilityService() {
                 Log.d("DigitalParentAccess", "Foreground App Detected: $packageName")
                 _foregroundApp.value = packageName
 
+                // Resolve real application name
+                _currentPackageName.value = packageName
+                var appLabel = packageName
+                try {
+                    val pm = packageManager
+                    val appInfo = pm.getApplicationInfo(packageName, 0)
+                    appLabel = pm.getApplicationLabel(appInfo).toString()
+                } catch (e: Exception) {
+                    // fall back
+                }
+                _currentAppName.value = appLabel
+
+                val ignored = isIgnoredPackage(packageName)
+                _isCurrentAppIgnored.value = ignored
+
                 // Check if this package is a blocked package
                 val isBlocked = synchronized(blockedPackageNames) {
                     blockedPackageNames.contains(packageName)
                 }
 
-                // Prevent blocking ourselves or general systems
-                val isSelf = packageName == "com.example"
-                val isSystemIgnorable = packageName == "com.android.systemui" || 
-                        packageName == "com.android.settings" || 
-                        packageName == "com.google.android.inputmethod.latin"
-
-                if (isBlocked && !isSelf && !isSystemIgnorable) {
+                if (isBlocked && !ignored) {
                     Log.d("DigitalParentAccess", "INTERCEPTING: Blocked App detected! Launching Blocker Overlay for $packageName")
                     showPremiumOverlay(packageName)
                 } else {
@@ -362,6 +430,15 @@ class DigitalParentAccessibilityService : AccessibilityService() {
     companion object {
         private val _foregroundApp = MutableStateFlow("None (Pending accessibility event)")
         val foregroundApp: StateFlow<String> = _foregroundApp.asStateFlow()
+
+        private val _currentPackageName = MutableStateFlow("None")
+        val currentPackageName: StateFlow<String> = _currentPackageName.asStateFlow()
+
+        private val _currentAppName = MutableStateFlow("None")
+        val currentAppName: StateFlow<String> = _currentAppName.asStateFlow()
+
+        private val _isCurrentAppIgnored = MutableStateFlow(false)
+        val isCurrentAppIgnored: StateFlow<Boolean> = _isCurrentAppIgnored.asStateFlow()
 
         private val _isServiceRunning = MutableStateFlow(false)
         val isServiceRunning: StateFlow<Boolean> = _isServiceRunning.asStateFlow()
