@@ -75,6 +75,7 @@ fun BlockerScreen(
     onGoHome: () -> Unit
 ) {
     val isWebsite = blockType == "WEBSITE"
+    val isContentWarn = blockType == "CONTENT_WARN"
 
     // Unified list of quotes
     val appQuotes = listOf(
@@ -93,9 +94,23 @@ fun BlockerScreen(
         "\"A wise man is one who calls himself to account and acts for the life after death.\" — Prophet Muhammad (PBUH)"
     )
 
+    val safetyQuotes = listOf(
+        "\"Lower your gaze and guard your heart. Shielding your mind builds strength and moral purity.\"",
+        "\"Do not let sight or words tempt your soul. True digital self-control is our highest shield.\"",
+        "\"Keep your intentions pure and environment clean. A pure mind leads to a pure life.\"",
+        "\"When harmful desires whisper, replace them with remembrance, focus, and noble work.\"",
+        "\"Purity is a shield that safeguards the light within your soul from getting dimmed.\""
+    )
+
     // Remember a random quote so it's stable per recomposition
     val selectedQuote = remember(target) {
-        if (isWebsite) islamicQuotes.random() else appQuotes.random()
+        if (isWebsite) {
+            islamicQuotes.random()
+        } else if (isContentWarn) {
+            safetyQuotes.random()
+        } else {
+            appQuotes.random()
+        }
     }
 
     Box(
@@ -107,6 +122,11 @@ fun BlockerScreen(
                     colors = if (isWebsite) {
                         listOf(
                             Color(0xFF14532D), // Deep Islamic/Emerald Green
+                            Color(0xFF0F172A)  // Slate 900
+                        )
+                    } else if (isContentWarn) {
+                        listOf(
+                            Color(0xFF78350F), // Deep Warning Gold/Amber (Amber 900)
                             Color(0xFF0F172A)  // Slate 900
                         )
                     } else {
@@ -126,12 +146,18 @@ fun BlockerScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            // Elegant pulsing shield lock / mosque logo
+            // Pulsing shield lock / warning logo
             Box(
                 modifier = Modifier
                     .size(80.dp)
                     .background(
-                        if (isWebsite) Color(0xFF10B981).copy(alpha = 0.12f) else Color(0xFFEF4444).copy(alpha = 0.12f),
+                        if (isWebsite) {
+                            Color(0xFF10B981).copy(alpha = 0.12f)
+                        } else if (isContentWarn) {
+                            Color(0xFFF59E0B).copy(alpha = 0.12f)
+                        } else {
+                            Color(0xFFEF4444).copy(alpha = 0.12f)
+                        },
                         RoundedCornerShape(24.dp)
                     ),
                 contentAlignment = Alignment.Center
@@ -139,7 +165,13 @@ fun BlockerScreen(
                 Icon(
                     imageVector = Icons.Default.Lock,
                     contentDescription = "Shield Lock Icon",
-                    tint = if (isWebsite) Color(0xFF34D399) else Color(0xFFF87171), // Soft Emerald or Soft Red
+                    tint = if (isWebsite) {
+                        Color(0xFF34D399)
+                    } else if (isContentWarn) {
+                        Color(0xFFFBBF24)
+                    } else {
+                        Color(0xFFF87171)
+                    },
                     modifier = Modifier.size(40.dp)
                 )
             }
@@ -147,18 +179,36 @@ fun BlockerScreen(
             Spacer(modifier = Modifier.height(32.dp))
 
             Text(
-                text = if (isWebsite) "WEBSITE ACCESS RESTRICTED" else "APPLICATION ACCESS RESTRICTED",
+                text = if (isWebsite) {
+                    "WEBSITE ACCESS RESTRICTED"
+                } else if (isContentWarn) {
+                    "INAPPROPRIATE CONTENT SHIELDED"
+                } else {
+                    "APPLICATION ACCESS RESTRICTED"
+                },
                 style = MaterialTheme.typography.titleSmall.copy(
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 2.sp,
-                    color = if (isWebsite) Color(0xFF34D399) else Color(0xFFF87171)
+                    color = if (isWebsite) {
+                        Color(0xFF34D399)
+                    } else if (isContentWarn) {
+                        Color(0xFFFBBF24)
+                    } else {
+                        Color(0xFFF87171)
+                    }
                 )
             )
 
             Spacer(modifier = Modifier.height(12.dp))
 
             Text(
-                text = if (isWebsite) "Divine Guard Active" else "Digital Guard Active",
+                text = if (isWebsite) {
+                    "Divine Guard Active"
+                } else if (isContentWarn) {
+                    "Logo Core-Shield Active"
+                } else {
+                    "Digital Guard Active"
+                },
                 style = MaterialTheme.typography.headlineMedium.copy(
                     fontWeight = FontWeight.Bold,
                     color = Color.White
@@ -178,7 +228,13 @@ fun BlockerScreen(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = if (isWebsite) "Restricted Target Website:" else "Restricted Target App:",
+                        text = if (isWebsite) {
+                            "Restricted Target Website:"
+                        } else if (isContentWarn) {
+                            "Triggered Safety Level Notice:"
+                        } else {
+                            "Restricted Target App:"
+                        },
                         fontSize = 11.sp,
                         color = Color(0xFF94A3B8), // Slate 400
                         fontWeight = FontWeight.Medium
@@ -208,11 +264,23 @@ fun BlockerScreen(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = if (isWebsite) "GUIDE TO PURITY" else "BREATHE & DISCONNECT",
+                        text = if (isWebsite) {
+                            "GUIDE TO PURITY"
+                        } else if (isContentWarn) {
+                            "HEFAZOT MORAL GUIDE"
+                        } else {
+                            "BREATHE & DISCONNECT"
+                        },
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         letterSpacing = 1.sp,
-                        color = if (isWebsite) Color(0xFF10B981) else Color(0xFF38BDF8) // Emerald or Soft Blue
+                        color = if (isWebsite) {
+                            Color(0xFF10B981)
+                        } else if (isContentWarn) {
+                            Color(0xFFF59E0B)
+                        } else {
+                            Color(0xFF38BDF8) // Emerald or Soft Blue
+                        }
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
@@ -231,7 +299,13 @@ fun BlockerScreen(
             Button(
                 onClick = onGoHome,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = if (isWebsite) Color(0xFF10B981) else Color(0xFFEF4444), // Emerald or Crimson
+                    containerColor = if (isWebsite) {
+                        Color(0xFF10B981)
+                    } else if (isContentWarn) {
+                        Color(0xFFF59E0B)
+                    } else {
+                        Color(0xFFEF4444)
+                    }, // Emerald, Amber, or Crimson
                     contentColor = Color.White
                 ),
                 shape = RoundedCornerShape(12.dp),
@@ -250,7 +324,13 @@ fun BlockerScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = if (isWebsite) "Return to Purity" else "Exit to Device Home Screen",
+                        text = if (isWebsite) {
+                            "Return to Purity"
+                        } else if (isContentWarn) {
+                            "Back to Safety"
+                        } else {
+                            "Exit to Device Home Screen"
+                        },
                         fontWeight = FontWeight.Bold,
                         fontSize = 16.sp
                     )

@@ -242,6 +242,14 @@ class MainViewModel : ViewModel() {
     private val _blockedWebsites = MutableStateFlow<List<BlockedWebsiteEntity>>(emptyList())
     val blockedWebsites: StateFlow<List<BlockedWebsiteEntity>> = _blockedWebsites.asStateFlow()
 
+    private val _contentSensitivityLevel = MutableStateFlow(2) // Default is Medium
+    val contentSensitivityLevel: StateFlow<Int> = _contentSensitivityLevel.asStateFlow()
+
+    private val _contentEventLogs = MutableStateFlow<List<ContentEventLogEntity>>(emptyList())
+    val contentEventLogs: StateFlow<List<ContentEventLogEntity>> = _contentEventLogs.asStateFlow()
+
+    private var contentEventRepo: ContentEventLogRepository? = null
+
     fun initialize(context: Context) {
         val appCtx = context.applicationContext
         if (lockManager == null) {
@@ -251,6 +259,7 @@ class MainViewModel : ViewModel() {
             _remainingTimeMs.value = lockManager!!.getRemainingTimeMs()
             _themeMode.value = lockManager!!.getThemeOption()
             _isOnboardingCompleted.value = lockManager!!.isOnboardingCompleted()
+            _contentSensitivityLevel.value = lockManager!!.getContentSensitivityLevel()
         }
         if (repository == null) {
             repository = BlockedAppRepository(appCtx)
@@ -266,6 +275,14 @@ class MainViewModel : ViewModel() {
             viewModelScope.launch {
                 websiteRepo!!.allBlockedWebsites.collect { dbList ->
                     _blockedWebsites.value = dbList
+                }
+            }
+        }
+        if (contentEventRepo == null) {
+            contentEventRepo = ContentEventLogRepository(appCtx)
+            viewModelScope.launch {
+                contentEventRepo!!.allLogs.collect { logs ->
+                    _contentEventLogs.value = logs
                 }
             }
         }
@@ -303,6 +320,17 @@ class MainViewModel : ViewModel() {
     fun setLockDelayMinutes(minutes: Int) {
         _chosenDelay.value = minutes
         lockManager?.setChosenDelayMinutes(minutes)
+    }
+
+    fun setContentSensitivityLevel(level: Int) {
+        _contentSensitivityLevel.value = level
+        lockManager?.setContentSensitivityLevel(level)
+    }
+
+    fun clearContentLogs() {
+        viewModelScope.launch {
+            contentEventRepo?.clearLogs()
+        }
     }
 
     fun initiateSettingsLock() {
@@ -703,6 +731,12 @@ fun PermissionDashboardScreen(
                     text = { Text("Locked Sites", fontWeight = FontWeight.Bold, fontSize = 11.sp) },
                     icon = { Icon(Icons.Default.Lock, contentDescription = "Web Block Icon") }
                 )
+                Tab(
+                    selected = selectedTab == 4,
+                    onClick = { selectedTab = 4 },
+                    text = { Text("Content Shield", fontWeight = FontWeight.Bold, fontSize = 11.sp) },
+                    icon = { Icon(Icons.Default.Info, contentDescription = "Content Safety Icon") }
+                )
             }
 
             Box(modifier = Modifier.weight(1f)) {
@@ -1022,8 +1056,10 @@ fun PermissionDashboardScreen(
                             }
                         }
                     }
-                } else {
+                } else if (selectedTab == 3) {
                     BlockedWebsitesScreen(viewModel = viewModel)
+                } else {
+                    ContentSafetyScreen(viewModel = viewModel)
                 }
             }
         }
@@ -3136,6 +3172,418 @@ fun BlockedWebsitesScreen(
                                 tint = MaterialTheme.colorScheme.error
                             )
                         }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun ContentSafetyScreen(viewModel: MainViewModel) {
+    val context = LocalContext.current
+    val sensitivity by viewModel.contentSensitivityLevel.collectAsStateWithLifecycle()
+    val logs by viewModel.contentEventLogs.collectAsStateWithLifecycle()
+    val isSettingsLocked by viewModel.isSettingsLocked.collectAsStateWithLifecycle()
+    var showUnlockPromptForSensitivity by remember { mutableStateOf(false) }
+    var pendingSensitivityLevel by remember { mutableIntStateOf(2) }
+
+    // Dialog for settings lock countdown when updating configurations while locked
+    if (showUnlockPromptForSensitivity) {
+        AlertDialog(
+            onDismissRequest = { showUnlockPromptForSensitivity = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = "Alert",
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Deactivation Safeguard Active")
+                }
+            },
+            text = {
+                Text(
+                    text = "Modifying Content sensitivity levels belongs to protected security settings. To prevent bypasses, you must start the un-bypassable countdown to unlock. Start countdown now?",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showUnlockPromptForSensitivity = false
+                        viewModel.initiateSettingsUnlockCountdown()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Initiate Countdown", color = MaterialTheme.colorScheme.onError)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showUnlockPromptForSensitivity = false }) {
+                    Text("Keep Safe", color = MaterialTheme.colorScheme.primary)
+                }
+            },
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    LazyColumn(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(horizontal = 20.dp)
+            .testTag("content_safety_screen"),
+        contentPadding = PaddingValues(top = 16.dp, bottom = 48.dp),
+        verticalArrangement = Arrangement.spacedBy(16.dp)
+    ) {
+        // Hero Section Header
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.primary.copy(alpha = 0.04f)),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.primary.copy(alpha = 0.15f)),
+                shape = RoundedCornerShape(16.dp)
+            ) {
+                Column(modifier = Modifier.padding(18.dp)) {
+                    Text(
+                        text = "HEFAZOT SHIELD CORE",
+                        style = MaterialTheme.typography.labelMedium.copy(
+                            fontWeight = FontWeight.Bold,
+                            letterSpacing = 1.2.sp
+                        ),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(6.dp))
+                    Text(
+                        text = "Moral & Content Safety",
+                        style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.Bold),
+                        color = MaterialTheme.colorScheme.onSurface
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                    Text(
+                        text = "Real-time, local on-device screening of content visible in active social media and browser windows to shield inappropriate texts, helping you guard your sight.",
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                }
+            }
+        }
+
+        // Privacy First Note card
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = Color(0xFF1E3A8A).copy(alpha = 0.08f)), // Warm Dark Blue Slate
+                border = BorderStroke(1.dp, Color(0xFF3B82F6).copy(alpha = 0.25f)),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Row(
+                    modifier = Modifier.padding(16.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.CheckCircle,
+                        contentDescription = "Shield Safe Check",
+                        tint = Color(0xFF3B82F6)
+                    )
+                    Spacer(modifier = Modifier.width(12.dp))
+                    Column {
+                        Text(
+                            text = "Privacy-First Architecture",
+                            fontWeight = FontWeight.Bold,
+                            fontSize = 14.sp,
+                            color = MaterialTheme.colorScheme.onSurface
+                        )
+                        Text(
+                            text = "All visual indicators are parsed locally. Your data, texts, and active screens never leave this device nor get uploaded.",
+                            fontSize = 11.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+            }
+        }
+
+        // Sensitivity Level selection
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "FILTERS & SENSITIVITY PROFILE",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, letterSpacing = 1.sp),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    val levels = listOf(
+                        Triple(0, "Off", "Disable all system-wide real-time text analysis checks."),
+                        Triple(1, "Low", "Shields Adult/Explicit materials."),
+                        Triple(2, "Medium", "Shields Adult, Violence, and Substance Abuse terms."),
+                        Triple(3, "High", "Maximum safety: Adult, Violence, Drugs, Gambling, and Suggestive terms.")
+                    )
+
+                    levels.forEach { (valInt, label, desc) ->
+                        val isSelected = sensitivity == valInt
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable {
+                                    if (!isSettingsLocked) {
+                                        viewModel.setContentSensitivityLevel(valInt)
+                                        Toast.makeText(context, "Content Shield sensitivity updated to $label", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        pendingSensitivityLevel = valInt
+                                        showUnlockPromptForSensitivity = true
+                                    }
+                                }
+                                .padding(vertical = 10.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = isSelected,
+                                onClick = {
+                                    if (!isSettingsLocked) {
+                                        viewModel.setContentSensitivityLevel(valInt)
+                                        Toast.makeText(context, "Content Shield sensitivity updated to $label", Toast.LENGTH_SHORT).show()
+                                    } else {
+                                        pendingSensitivityLevel = valInt
+                                        showUnlockPromptForSensitivity = true
+                                    }
+                                }
+                            )
+                            Spacer(modifier = Modifier.width(6.dp))
+                            Column {
+                                Text(
+                                    text = label,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    color = if (isSelected) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurface
+                                )
+                                Text(
+                                    text = desc,
+                                    fontSize = 11.sp,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Active Guard Targets list (badged in rows of 2)
+        item {
+            Card(
+                modifier = Modifier.fillMaxWidth(),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.25f)),
+                border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+                shape = RoundedCornerShape(14.dp)
+            ) {
+                Column(modifier = Modifier.padding(16.dp)) {
+                    Text(
+                        text = "MONITORED APPLICATIONS",
+                        style = MaterialTheme.typography.labelSmall.copy(fontWeight = FontWeight.Bold, letterSpacing = 1.sp),
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Content Safety scans text overlays, posts, or browser windows in the background in these supported apps:",
+                        fontSize = 11.sp,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Spacer(modifier = Modifier.height(12.dp))
+
+                    val supportedApps = listOf(
+                        "Chrome" to "com.android.chrome",
+                        "Firefox" to "org.mozilla.firefox",
+                        "Brave Browser" to "com.brave.browser",
+                        "Facebook" to "com.facebook.katana",
+                        "X (Twitter)" to "com.twitter.android",
+                        "Instagram" to "com.instagram.android",
+                        "TikTok" to "com.zhiliaoapp.musically",
+                        "Messenger" to "com.facebook.orca"
+                    )
+
+                    // Display apps in rows of 2 for clean layout density
+                    val rows = supportedApps.chunked(2)
+                    rows.forEach { pairList ->
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            pairList.forEach { (label, _) ->
+                                Surface(
+                                    shape = RoundedCornerShape(8.dp),
+                                    color = MaterialTheme.colorScheme.surface,
+                                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                                    modifier = Modifier.weight(1f).padding(vertical = 2.dp)
+                                ) {
+                                    Row(
+                                        modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+                                        verticalAlignment = Alignment.CenterVertically
+                                    ) {
+                                        Box(
+                                            modifier = Modifier
+                                                .size(8.dp)
+                                                .background(Color(0xFF10B981), RoundedCornerShape(50))
+                                        )
+                                        Spacer(modifier = Modifier.width(8.dp))
+                                        Text(label, fontSize = 11.sp, fontWeight = FontWeight.Bold, maxLines = 1)
+                                    }
+                                }
+                            }
+                            // If it's an odd list, add an empty placeholder to balance weights
+                            if (pairList.size == 1) {
+                                Spacer(modifier = Modifier.weight(1f))
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Logs Header / Alert History
+        item {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically,
+                horizontalArrangement = Arrangement.SpaceBetween
+            ) {
+                Text(
+                    text = "RECENT SHIELD LOGS",
+                    style = MaterialTheme.typography.labelMedium.copy(fontWeight = FontWeight.Bold, letterSpacing = 1.sp),
+                    color = MaterialTheme.colorScheme.onSurface
+                )
+                if (logs.isNotEmpty()) {
+                    TextButton(
+                        onClick = {
+                            viewModel.clearContentLogs()
+                            Toast.makeText(context, "Log history cleared.", Toast.LENGTH_SHORT).show()
+                        }
+                    ) {
+                        Text("Clear Logs", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.error)
+                    }
+                }
+            }
+        }
+
+        if (logs.isEmpty()) {
+            item {
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.5f)),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Box(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .padding(24.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                            Text("🕌", fontSize = 28.sp)
+                            Spacer(modifier = Modifier.height(8.dp))
+                            Text(
+                                text = "Screen is pure",
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.onSurface,
+                                fontSize = 14.sp
+                            )
+                            Spacer(modifier = Modifier.height(4.dp))
+                            Text(
+                                text = "Praise be to God, no inappropriate content has been intercepted yet.",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                style = MaterialTheme.typography.bodySmall,
+                                textAlign = TextAlign.Center
+                            )
+                        }
+                    }
+                }
+            }
+        } else {
+            items(logs, key = { it.id }) { log ->
+                Card(
+                    modifier = Modifier.fillMaxWidth(),
+                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                    border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.7f)),
+                    shape = RoundedCornerShape(12.dp)
+                ) {
+                    Column(modifier = Modifier.padding(14.dp)) {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Text(
+                                text = log.appName,
+                                fontWeight = FontWeight.Bold,
+                                fontSize = 14.sp,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                            Surface(
+                                color = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.4f),
+                                contentColor = MaterialTheme.colorScheme.onErrorContainer,
+                                shape = RoundedCornerShape(4.dp)
+                            ) {
+                                Text(
+                                    text = log.severity,
+                                    fontSize = 10.sp,
+                                    fontWeight = FontWeight.Bold,
+                                    modifier = Modifier.padding(horizontal = 6.dp, vertical = 2.dp)
+                                )
+                            }
+                        }
+                        Spacer(modifier = Modifier.height(6.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "Category: ",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = log.category,
+                                fontSize = 11.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = MaterialTheme.colorScheme.primary
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(2.dp))
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Text(
+                                text = "Triggered Key: ",
+                                fontSize = 11.sp,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                            Text(
+                                text = "'${log.detectedText}'",
+                                fontSize = 11.sp,
+                                fontFamily = FontFamily.Monospace,
+                                color = MaterialTheme.colorScheme.onSurface
+                            )
+                        }
+                        Spacer(modifier = Modifier.height(8.dp))
+                        val formattedTime = remember(log.timestamp) {
+                            try {
+                                val sdf = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm:ss", java.util.Locale.getDefault())
+                                sdf.format(java.util.Date(log.timestamp))
+                            } catch (e: Exception) {
+                                log.timestamp.toString()
+                            }
+                        }
+                        Text(
+                            text = formattedTime,
+                            fontSize = 10.sp,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f)
+                        )
                     }
                 }
             }

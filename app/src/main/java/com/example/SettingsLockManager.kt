@@ -33,6 +33,15 @@ class SettingsLockManager(context: Context) {
         private const val KEY_THEME_OPTION = "theme_option"
         private const val KEY_ONBOARDING_COMPLETED = "onboarding_completed"
         private const val KEY_PERMANENT_DELAY_MINUTES = "permanent_delay_minutes"
+        private const val KEY_CONTENT_SENSITIVITY_LEVEL = "content_sensitivity_level"
+    }
+
+    fun getContentSensitivityLevel(): Int {
+        return prefs.getInt(KEY_CONTENT_SENSITIVITY_LEVEL, 2) // default to 2 (Medium)
+    }
+
+    fun setContentSensitivityLevel(level: Int) {
+        prefs.edit().putInt(KEY_CONTENT_SENSITIVITY_LEVEL, level).apply()
     }
 
     fun getThemeOption(): Int {

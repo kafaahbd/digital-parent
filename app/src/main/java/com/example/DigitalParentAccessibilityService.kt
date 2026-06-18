@@ -24,7 +24,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
-enum class BlockType { APP, WEBSITE }
+enum class BlockType { APP, WEBSITE, CONTENT_WARN }
 
 class DigitalParentAccessibilityService : AccessibilityService() {
 
@@ -32,6 +32,14 @@ class DigitalParentAccessibilityService : AccessibilityService() {
     private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
     private lateinit var repository: BlockedAppRepository
     private lateinit var websiteRepository: BlockedWebsiteRepository
+    
+    // Content Safety variables
+    private lateinit var contentSafetyManager: ContentSafetyManager
+    private lateinit var contentEventLogRepository: ContentEventLogRepository
+    private lateinit var settingsLockManager: SettingsLockManager
+    
+    private val lastScanTimeMap = mutableMapOf<String, Long>()
+    private val lastTextMap = mutableMapOf<String, String>()
     
     // In-memory cache of blocked package names for fast thread-safe queries
     private val blockedPackageNames = mutableSetOf<String>()
@@ -103,6 +111,9 @@ class DigitalParentAccessibilityService : AccessibilityService() {
         super.onCreate()
         repository = BlockedAppRepository(this)
         websiteRepository = BlockedWebsiteRepository(this)
+        contentSafetyManager = ContentSafetyManager(this)
+        contentEventLogRepository = ContentEventLogRepository(this)
+        settingsLockManager = SettingsLockManager(this)
         loadLauncherPackages()
         
         // Reactively collect the list of blocked app packages from Room
@@ -148,6 +159,61 @@ class DigitalParentAccessibilityService : AccessibilityService() {
                 "com.sec.android.app.sbrowser"
             )
             
+            // Content Safety local analysis layer (privacy-first screening)
+            run {
+                val levelValue = settingsLockManager.getContentSensitivityLevel()
+                val sensitivity = ContentSensitivityLevel.fromValue(levelValue)
+                if (sensitivity != ContentSensitivityLevel.OFF && contentSafetyManager.isSupportedApp(packageName)) {
+                    val rootNode = rootInActiveWindow
+                    if (rootNode != null) {
+                        val builder = java.lang.StringBuilder()
+                        extractTextFromNode(rootNode, builder)
+                        val screenText = builder.toString().trim()
+                        rootNode.recycle()
+
+                        if (screenText.isNotEmpty()) {
+                            val now = System.currentTimeMillis()
+                            val lastScan = lastScanTimeMap[packageName] ?: 0L
+                            val lastText = lastTextMap[packageName] ?: ""
+                            
+                            // Battery & Performance optimization: scan screen throttled OR if text updates
+                            if ((now - lastScan > 1000) && screenText != lastText) {
+                                lastScanTimeMap[packageName] = now
+                                lastTextMap[packageName] = screenText
+
+                                val detection = contentSafetyManager.analyzeText(screenText, sensitivity)
+                                if (detection.isRisky) {
+                                    var appLabel = packageName
+                                    try {
+                                        val pm = packageManager
+                                        val appInfo = pm.getApplicationInfo(packageName, 0)
+                                        appLabel = pm.getApplicationLabel(appInfo).toString()
+                                    } catch (e: Exception) {
+                                        // ignore
+                                    }
+
+                                    Log.w("DigitalParentAccess", "Content Safety Alert: Risky keyword '${detection.matchedKeyword}' in app $appLabel")
+                                    
+                                    serviceScope.launch {
+                                        contentEventLogRepository.logEvent(
+                                            appName = appLabel,
+                                            packageName = packageName,
+                                            detectedText = detection.matchedKeyword,
+                                            category = detection.category,
+                                            severity = detection.severity,
+                                            actionTaken = "Shield Overlay Warning"
+                                        )
+                                    }
+
+                                    showOverlay(BlockType.CONTENT_WARN, detection.category + " Content (Word: " + detection.matchedKeyword + ")")
+                                    return
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             if (browserPackages.contains(packageName)) {
                 val rootNode = rootInActiveWindow
                 val url = findBrowserUrl(rootNode)
@@ -193,12 +259,28 @@ class DigitalParentAccessibilityService : AccessibilityService() {
                     } else {
                         // Switch to a non-blocked app -> remove overlay
                         val type = currentOverlayType
-                        if (type == BlockType.APP || (type == BlockType.WEBSITE && !browserPackages.contains(packageName))) {
+                        if (type == BlockType.APP || 
+                            (type == BlockType.WEBSITE && !browserPackages.contains(packageName)) ||
+                            (type == BlockType.CONTENT_WARN && isIgnoredPackage(packageName))) {
                             removePremiumOverlay()
                         }
                     }
                 }
             }
+        }
+    }
+
+    private fun extractTextFromNode(node: AccessibilityNodeInfo?, builder: java.lang.StringBuilder) {
+        if (node == null) return
+        val text = node.text
+        if (text != null && text.isNotBlank()) {
+            builder.append(text).append(" ")
+        }
+        val childCount = node.childCount
+        for (i in 0 until childCount) {
+            val child = node.getChild(i) ?: continue
+            extractTextFromNode(child, builder)
+            child.recycle()
         }
     }
 
@@ -317,7 +399,13 @@ class DigitalParentAccessibilityService : AccessibilityService() {
             // Update existing view text to avoid flickering
             val pkgTextView = premiumOverlayView?.findViewWithTag<TextView>("package_text")
             if (pkgTextView != null) {
-                pkgTextView.text = if (blockType == BlockType.APP) "Blocked App: $target" else "Blocked Website: $target"
+                pkgTextView.text = if (blockType == BlockType.APP) {
+                    "Blocked App: $target"
+                } else if (blockType == BlockType.CONTENT_WARN) {
+                    "Detected: $target"
+                } else {
+                    "Blocked Website: $target"
+                }
             }
             currentOverlayTarget = target
             currentOverlayType = blockType
@@ -337,6 +425,11 @@ class DigitalParentAccessibilityService : AccessibilityService() {
                 if (blockType == BlockType.WEBSITE) {
                     intArrayOf(
                         Color.parseColor("#14532D"), // Deep Islamic Green (Green 900)
+                        Color.parseColor("#0F172A")  // Deep Slate-Blue
+                    )
+                } else if (blockType == BlockType.CONTENT_WARN) {
+                    intArrayOf(
+                        Color.parseColor("#78350F"), // Deep Warning Gold/Amber (Amber 900)
                         Color.parseColor("#0F172A")  // Deep Slate-Blue
                     )
                 } else {
@@ -360,7 +453,13 @@ class DigitalParentAccessibilityService : AccessibilityService() {
 
         // 3. Shield Lock Icon View
         val lockIcon = TextView(this).apply {
-            text = if (blockType == BlockType.WEBSITE) "🕌" else "🛡️"
+            text = if (blockType == BlockType.WEBSITE) {
+                "🕌"
+            } else if (blockType == BlockType.CONTENT_WARN) {
+                "⚠️"
+            } else {
+                "🛡️"
+            }
             textSize = 64f
             gravity = Gravity.CENTER
             setPadding(0, 0, 0, dp(16))
@@ -369,8 +468,23 @@ class DigitalParentAccessibilityService : AccessibilityService() {
 
         // 4. Little restricted banner
         val restrictedLabel = TextView(this).apply {
-            text = if (blockType == BlockType.WEBSITE) "WEBSITE ACCESS RESTRICTED" else "APPLICATION ACCESS RESTRICTED"
-            setTextColor(if (blockType == BlockType.WEBSITE) Color.parseColor("#10B981") else Color.parseColor("#EF4444"))
+            text = if (blockType == BlockType.WEBSITE) {
+                "WEBSITE ACCESS RESTRICTED"
+            } else if (blockType == BlockType.CONTENT_WARN) {
+                "INAPPROPRIATE CONTENT SHIELDED"
+            } else {
+                "APPLICATION ACCESS RESTRICTED"
+            }
+            
+            setTextColor(
+                if (blockType == BlockType.WEBSITE) {
+                    Color.parseColor("#10B981")
+                } else if (blockType == BlockType.CONTENT_WARN) {
+                    Color.parseColor("#F59E0B")
+                } else {
+                    Color.parseColor("#EF4444")
+                }
+            )
             textSize = 12f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
@@ -381,7 +495,13 @@ class DigitalParentAccessibilityService : AccessibilityService() {
 
         // 5. Giant Bold Title
         val titleLabel = TextView(this).apply {
-            text = if (blockType == BlockType.WEBSITE) "Divine Guard Filter" else "Digital Parent Guard"
+            text = if (blockType == BlockType.WEBSITE) {
+                "Divine Guard Filter"
+            } else if (blockType == BlockType.CONTENT_WARN) {
+                "Hefazot Core Guardian"
+            } else {
+                "Digital Parent Guard"
+            }
             setTextColor(Color.WHITE)
             textSize = 28f
             typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD)
@@ -392,7 +512,13 @@ class DigitalParentAccessibilityService : AccessibilityService() {
 
         // 6. Subtitle / Warning Note
         val subtitleLabel = TextView(this).apply {
-            text = if (blockType == BlockType.WEBSITE) "Guarding our hearts, minds, and sight from distractions." else "Balanced digital lifestyle requires moderation."
+            text = if (blockType == BlockType.WEBSITE) {
+                "Guarding our hearts, minds, and sight from distractions."
+            } else if (blockType == BlockType.CONTENT_WARN) {
+                "Lower your gaze. Content safety filters has shielded inappropriate visual/textual content."
+            } else {
+                "Balanced digital lifestyle requires moderation."
+            }
             setTextColor(Color.parseColor("#94A3B8")) // Slate 400
             textSize = 14f
             gravity = Gravity.CENTER
@@ -407,6 +533,10 @@ class DigitalParentAccessibilityService : AccessibilityService() {
                     setColor(Color.parseColor("#3410B981")) // Semi-transparent Green
                     cornerRadius = dp(12).toFloat()
                     setStroke(dp(1), Color.parseColor("#6610B981"))
+                } else if (blockType == BlockType.CONTENT_WARN) {
+                    setColor(Color.parseColor("#34F59E0B")) // Semi-transparent Amber
+                    cornerRadius = dp(12).toFloat()
+                    setStroke(dp(1), Color.parseColor("#66F59E0B"))
                 } else {
                     setColor(Color.parseColor("#34EF4444")) // Semi-transparent Red accent
                     cornerRadius = dp(12).toFloat()
@@ -426,7 +556,13 @@ class DigitalParentAccessibilityService : AccessibilityService() {
         }
 
         val targetText = TextView(this).apply {
-            text = if (blockType == BlockType.APP) "Blocked App: $target" else "Blocked Website: $target"
+            text = if (blockType == BlockType.APP) {
+                "Blocked App: $target"
+            } else if (blockType == BlockType.CONTENT_WARN) {
+                "Detected: $target"
+            } else {
+                "Blocked Website: $target"
+            }
             tag = "package_text"
             setTextColor(Color.parseColor("#FFFFFF"))
             textSize = 14f
@@ -461,8 +597,23 @@ class DigitalParentAccessibilityService : AccessibilityService() {
         }
 
         val quoteHeader = TextView(this).apply {
-            text = if (blockType == BlockType.WEBSITE) "GUIDE TO MINDFULNESS" else "BREATHE & DISCONNECT"
-            setTextColor(if (blockType == BlockType.WEBSITE) Color.parseColor("#10B981") else Color.parseColor("#38BDF8")) // Cool soft blue or emerald
+            text = if (blockType == BlockType.WEBSITE) {
+                "GUIDE TO MINDFULNESS"
+            } else if (blockType == BlockType.CONTENT_WARN) {
+                "HEFAZOT MORAL SHIELD"
+            } else {
+                "BREATHE & DISCONNECT"
+            }
+            
+            setTextColor(
+                if (blockType == BlockType.WEBSITE) {
+                    Color.parseColor("#10B981")
+                } else if (blockType == BlockType.CONTENT_WARN) {
+                    Color.parseColor("#F59E0B")
+                } else {
+                    Color.parseColor("#38BDF8")
+                }
+            )
             textSize = 11f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
@@ -486,14 +637,28 @@ class DigitalParentAccessibilityService : AccessibilityService() {
             "\"Speak good or remain silent.\" — Prophet Muhammad (PBUH)",
             "\"A wise man is one who calls himself to account and acts for the life after death.\" — Prophet Muhammad (PBUH)"
         )
+
+        val safetyQuotes = listOf(
+            "\"Lower your gaze and guard your heart. Shielding your mind builds strength and moral purity.\"",
+            "\"Do not let sight or words tempt your soul. True digital self-control is our highest shield.\"",
+            "\"Keep your intentions pure and environment clean. A pure mind leads to a pure life.\"",
+            "\"When harmful desires whisper, replace them with remembrance, focus, and noble work.\"",
+            "\"Purity is a shield that safeguards the light within your soul from getting dimmed.\""
+        )
         
-        val selectedQuote = if (blockType == BlockType.WEBSITE) islamicQuotes.random() else appQuotes.random()
+        val selectedQuote = if (blockType == BlockType.WEBSITE) {
+            islamicQuotes.random()
+        } else if (blockType == BlockType.CONTENT_WARN) {
+            safetyQuotes.random()
+        } else {
+            appQuotes.random()
+        }
 
         val quoteBody = TextView(this).apply {
             text = selectedQuote
             setTextColor(Color.parseColor("#E2E8F0")) // Slate 200
             textSize = 15f
-            if (blockType == BlockType.WEBSITE) {
+            if (blockType == BlockType.WEBSITE || blockType == BlockType.CONTENT_WARN) {
                 typeface = android.graphics.Typeface.create("serif", android.graphics.Typeface.NORMAL)
             } else {
                 typeface = android.graphics.Typeface.create("serif", android.graphics.Typeface.ITALIC)
@@ -506,13 +671,26 @@ class DigitalParentAccessibilityService : AccessibilityService() {
 
         // 9. Prominent authoritative "Exit to Home Screen" Button
         val exitButton = Button(this).apply {
-            text = if (blockType == BlockType.WEBSITE) "Return to Purity (Exit)" else "Exit to Home Screen"
+            text = if (blockType == BlockType.WEBSITE) {
+                "Return to Purity (Exit)"
+            } else if (blockType == BlockType.CONTENT_WARN) {
+                "Back to Safety (Exit)"
+            } else {
+                "Exit to Home Screen"
+            }
             setTextColor(Color.WHITE)
             textSize = 16f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
             
             val activeBg = GradientDrawable().apply {
-                setColor(if (blockType == BlockType.WEBSITE) Color.parseColor("#10B981") else Color.parseColor("#E11D48")) // emerald or rose 600
+                val colorHex = if (blockType == BlockType.WEBSITE) {
+                    "#10B981"
+                } else if (blockType == BlockType.CONTENT_WARN) {
+                    "#F59E0B"
+                } else {
+                    "#E11D48"
+                }
+                setColor(Color.parseColor(colorHex))
                 cornerRadius = dp(12).toFloat()
             }
             background = activeBg
