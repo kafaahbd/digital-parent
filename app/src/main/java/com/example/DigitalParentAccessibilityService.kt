@@ -10,6 +10,7 @@ import android.util.Log
 import android.view.Gravity
 import android.view.WindowManager
 import android.view.accessibility.AccessibilityEvent
+import android.view.accessibility.AccessibilityNodeInfo
 import android.widget.Button
 import android.widget.FrameLayout
 import android.widget.LinearLayout
@@ -23,17 +24,22 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
+enum class BlockType { APP, WEBSITE }
+
 class DigitalParentAccessibilityService : AccessibilityService() {
 
     private val serviceJob = SupervisorJob()
     private val serviceScope = CoroutineScope(Dispatchers.Main + serviceJob)
     private lateinit var repository: BlockedAppRepository
+    private lateinit var websiteRepository: BlockedWebsiteRepository
     
     // In-memory cache of blocked package names for fast thread-safe queries
     private val blockedPackageNames = mutableSetOf<String>()
+    private val blockedWebsites = mutableListOf<BlockedWebsiteEntity>()
 
     private var premiumOverlayView: FrameLayout? = null
-    private var currentOverlayPackage: String? = null
+    private var currentOverlayTarget: String? = null
+    private var currentOverlayType: BlockType? = null
 
     private val launcherPackages = mutableSetOf<String>()
 
@@ -96,6 +102,7 @@ class DigitalParentAccessibilityService : AccessibilityService() {
     override fun onCreate() {
         super.onCreate()
         repository = BlockedAppRepository(this)
+        websiteRepository = BlockedWebsiteRepository(this)
         loadLauncherPackages()
         
         // Reactively collect the list of blocked app packages from Room
@@ -109,69 +116,216 @@ class DigitalParentAccessibilityService : AccessibilityService() {
                 Log.d("DigitalParentAccess", "Updated blocked packages cache: $pkgs")
             }
         }
+
+        // Reactively collect blocked websites
+        serviceScope.launch {
+            websiteRepository.allBlockedWebsites.collect { entities ->
+                synchronized(blockedWebsites) {
+                    blockedWebsites.clear()
+                    blockedWebsites.addAll(entities)
+                }
+                Log.d("DigitalParentAccess", "Updated blocked websites cache: ${entities.map { it.urlOrKeyword }}")
+            }
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
         if (event == null) return
         
-        // Match state changed to capture foreground application packaging
-        if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
-            val packageNameChar = event.packageName
-            if (packageNameChar != null) {
-                val packageName = packageNameChar.toString()
-                Log.d("DigitalParentAccess", "Foreground App Detected: $packageName")
-                _foregroundApp.value = packageName
-
-                // Resolve real application name
-                _currentPackageName.value = packageName
-                var appLabel = packageName
-                try {
-                    val pm = packageManager
-                    val appInfo = pm.getApplicationInfo(packageName, 0)
-                    appLabel = pm.getApplicationLabel(appInfo).toString()
-                } catch (e: Exception) {
-                    // fall back
+        val packageNameChar = event.packageName
+        if (packageNameChar != null) {
+            val packageName = packageNameChar.toString()
+            
+            // Flag to check if we handled website blocking
+            var websiteInterceded = false
+            
+            val browserPackages = setOf(
+                "com.android.chrome",
+                "org.mozilla.firefox",
+                "org.mozilla.focus",
+                "com.brave.browser",
+                "com.microsoft.emmx",
+                "com.sec.android.app.sbrowser"
+            )
+            
+            if (browserPackages.contains(packageName)) {
+                val rootNode = rootInActiveWindow
+                val url = findBrowserUrl(rootNode)
+                if (url != null) {
+                    Log.d("DigitalParentAccess", "Detected browser URL: $url in package $packageName")
+                    val isBlockedWeb = synchronized(blockedWebsites) {
+                        isUrlBlocked(url, blockedWebsites)
+                    }
+                    if (isBlockedWeb) {
+                        Log.d("DigitalParentAccess", "INTERCEPTING: Blocked website detected! Drawing Overlay for $url")
+                        showOverlay(BlockType.WEBSITE, url)
+                        websiteInterceded = true
+                    }
                 }
-                _currentAppName.value = appLabel
+            }
+            
+            if (!websiteInterceded) {
+                if (event.eventType == AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED) {
+                    Log.d("DigitalParentAccess", "Foreground App Detected: $packageName")
+                    _foregroundApp.value = packageName
 
-                val ignored = isIgnoredPackage(packageName)
-                _isCurrentAppIgnored.value = ignored
+                    _currentPackageName.value = packageName
+                    var appLabel = packageName
+                    try {
+                        val pm = packageManager
+                        val appInfo = pm.getApplicationInfo(packageName, 0)
+                        appLabel = pm.getApplicationLabel(appInfo).toString()
+                    } catch (e: Exception) {
+                        // ignore
+                    }
+                    _currentAppName.value = appLabel
 
-                // Check if this package is a blocked package
-                val isBlocked = synchronized(blockedPackageNames) {
-                    blockedPackageNames.contains(packageName)
-                }
+                    val ignored = isIgnoredPackage(packageName)
+                    _isCurrentAppIgnored.value = ignored
 
-                if (isBlocked && !ignored) {
-                    Log.d("DigitalParentAccess", "INTERCEPTING: Blocked App detected! Launching Blocker Overlay for $packageName")
-                    showPremiumOverlay(packageName)
-                } else {
-                    // Switch to a non-blocked app or system screen -> remove overlay
-                    removePremiumOverlay()
+                    val isBlocked = synchronized(blockedPackageNames) {
+                        blockedPackageNames.contains(packageName)
+                    }
+
+                    if (isBlocked && !ignored) {
+                        Log.d("DigitalParentAccess", "INTERCEPTING: Blocked App detected! Launching Blocker Overlay for $packageName")
+                        showOverlay(BlockType.APP, packageName)
+                    } else {
+                        // Switch to a non-blocked app -> remove overlay
+                        val type = currentOverlayType
+                        if (type == BlockType.APP || (type == BlockType.WEBSITE && !browserPackages.contains(packageName))) {
+                            removePremiumOverlay()
+                        }
+                    }
                 }
             }
         }
     }
 
-    private fun showPremiumOverlay(blockedPackage: String) {
+    private fun isUrlBlocked(url: String, blockedWebsites: List<BlockedWebsiteEntity>): Boolean {
+        val cleanUrl = url.trim().lowercase()
+        
+        // Strip protocol
+        var hostAndPath = cleanUrl
+        if (hostAndPath.startsWith("http://")) {
+            hostAndPath = hostAndPath.substring(7)
+        } else if (hostAndPath.startsWith("https://")) {
+            hostAndPath = hostAndPath.substring(8)
+        }
+        
+        // Strip "www." prefix
+        if (hostAndPath.startsWith("www.")) {
+            hostAndPath = hostAndPath.substring(4)
+        }
+        
+        for (website in blockedWebsites) {
+            if (!website.isBlocked) continue
+            val pattern = website.urlOrKeyword.trim().lowercase()
+            
+            if (website.isKeyword) {
+                if (cleanUrl.contains(pattern)) {
+                    return true
+                }
+            } else {
+                var cleanPattern = pattern
+                if (cleanPattern.startsWith("http://")) {
+                    cleanPattern = cleanPattern.substring(7)
+                } else if (cleanPattern.startsWith("https://")) {
+                    cleanPattern = cleanPattern.substring(8)
+                }
+                if (cleanPattern.startsWith("www.")) {
+                    cleanPattern = cleanPattern.substring(4)
+                }
+                
+                if (hostAndPath == cleanPattern || 
+                    hostAndPath.startsWith("$cleanPattern/") || 
+                    hostAndPath.endsWith(".$cleanPattern") || 
+                    hostAndPath.contains(".$cleanPattern/")
+                ) {
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private fun findBrowserUrl(node: AccessibilityNodeInfo?): String? {
+        if (node == null) return null
+        
+        val id = node.viewIdResourceName
+        if (id != null) {
+            val trimmedId = id.lowercase()
+            if (trimmedId.contains("url_bar") || 
+                trimmedId.contains("url_text") || 
+                trimmedId.contains("location_bar_edit_text") ||
+                trimmedId.contains("search_src_text") ||
+                trimmedId.contains("url_bar_title") ||
+                trimmedId.contains("address_bar")
+            ) {
+                val text = node.text?.toString()?.trim()
+                if (!text.isNullOrBlank()) {
+                    return text
+                }
+            }
+        }
+        
+        val className = node.className?.toString()
+        if (className != null && (className.contains("EditText") || className.contains("TextView"))) {
+            val text = node.text?.toString()?.trim()
+            if (!text.isNullOrBlank() && (text.startsWith("http://") || text.startsWith("https://") || isUrlPattern(text))) {
+                return text
+            }
+        }
+        
+        val childCount = node.childCount
+        for (i in 0 until childCount) {
+            val child = node.getChild(i) ?: continue
+            val url = findBrowserUrl(child)
+            child.recycle()
+            if (url != null) {
+                return url
+            }
+        }
+        
+        return null
+    }
+
+    private fun isUrlPattern(text: String): Boolean {
+        if (text.contains(" ")) return false
+        val dotIndex = text.indexOf('.')
+        if (dotIndex > 0 && dotIndex < text.length - 1) {
+            val domainParts = text.split('.')
+            val lastPart = domainParts.lastOrNull()?.lowercase() ?: ""
+            if (lastPart.length in 2..6) {
+                return true
+            }
+        }
+        return false
+    }
+
+    private fun showOverlay(blockType: BlockType, target: String) {
         if (!Settings.canDrawOverlays(this)) {
             Log.e("DigitalParentAccess", "Cannot draw overlay, permission missing. Falling back to Activity.")
-            launchBlockerWindow(blockedPackage)
+            launchBlockerWindow(target, blockType)
             return
         }
 
         if (premiumOverlayView != null) {
-            if (currentOverlayPackage == blockedPackage) {
+            if (currentOverlayTarget == target && currentOverlayType == blockType) {
                 return
             }
-            // Update existing layout instead of recreation to avoid flickering
+            // Update existing view text to avoid flickering
             val pkgTextView = premiumOverlayView?.findViewWithTag<TextView>("package_text")
-            pkgTextView?.text = "Blocked App: $blockedPackage"
-            currentOverlayPackage = blockedPackage
+            if (pkgTextView != null) {
+                pkgTextView.text = if (blockType == BlockType.APP) "Blocked App: $target" else "Blocked Website: $target"
+            }
+            currentOverlayTarget = target
+            currentOverlayType = blockType
             return
         }
 
-        currentOverlayPackage = blockedPackage
+        currentOverlayTarget = target
+        currentOverlayType = blockType
         val windowManager = getSystemService(Context.WINDOW_SERVICE) as WindowManager
         val density = resources.displayMetrics.density
         fun dp(value: Int) = (value * density).toInt()
@@ -180,10 +334,17 @@ class DigitalParentAccessibilityService : AccessibilityService() {
         val root = FrameLayout(this).apply {
             val backgroundDrawable = GradientDrawable(
                 GradientDrawable.Orientation.TOP_BOTTOM,
-                intArrayOf(
-                    Color.parseColor("#450A0A"), // Deep Crimson (Red 950)
-                    Color.parseColor("#0F172A")  // Deep Slate-Blue (Slate 900)
-                )
+                if (blockType == BlockType.WEBSITE) {
+                    intArrayOf(
+                        Color.parseColor("#14532D"), // Deep Islamic Green (Green 900)
+                        Color.parseColor("#0F172A")  // Deep Slate-Blue
+                    )
+                } else {
+                    intArrayOf(
+                        Color.parseColor("#450A0A"), // Deep Crimson (Red 950)
+                        Color.parseColor("#0F172A")  // Deep Slate-Blue
+                    )
+                }
             )
             background = backgroundDrawable
             isClickable = true
@@ -199,7 +360,7 @@ class DigitalParentAccessibilityService : AccessibilityService() {
 
         // 3. Shield Lock Icon View
         val lockIcon = TextView(this).apply {
-            text = "🛡️"
+            text = if (blockType == BlockType.WEBSITE) "🕌" else "🛡️"
             textSize = 64f
             gravity = Gravity.CENTER
             setPadding(0, 0, 0, dp(16))
@@ -208,8 +369,8 @@ class DigitalParentAccessibilityService : AccessibilityService() {
 
         // 4. Little restricted banner
         val restrictedLabel = TextView(this).apply {
-            text = "ACCESS RESTRICTED"
-            setTextColor(Color.parseColor("#EF4444")) // Red 500
+            text = if (blockType == BlockType.WEBSITE) "WEBSITE ACCESS RESTRICTED" else "APPLICATION ACCESS RESTRICTED"
+            setTextColor(if (blockType == BlockType.WEBSITE) Color.parseColor("#10B981") else Color.parseColor("#EF4444"))
             textSize = 12f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
@@ -220,7 +381,7 @@ class DigitalParentAccessibilityService : AccessibilityService() {
 
         // 5. Giant Bold Title
         val titleLabel = TextView(this).apply {
-            text = "Digital Parent Guard"
+            text = if (blockType == BlockType.WEBSITE) "Divine Guard Filter" else "Digital Parent Guard"
             setTextColor(Color.WHITE)
             textSize = 28f
             typeface = android.graphics.Typeface.create("sans-serif-medium", android.graphics.Typeface.BOLD)
@@ -231,7 +392,7 @@ class DigitalParentAccessibilityService : AccessibilityService() {
 
         // 6. Subtitle / Warning Note
         val subtitleLabel = TextView(this).apply {
-            text = "Balanced digital lifestyle requires moderation."
+            text = if (blockType == BlockType.WEBSITE) "Guarding our hearts, minds, and sight from distractions." else "Balanced digital lifestyle requires moderation."
             setTextColor(Color.parseColor("#94A3B8")) // Slate 400
             textSize = 14f
             gravity = Gravity.CENTER
@@ -242,9 +403,15 @@ class DigitalParentAccessibilityService : AccessibilityService() {
         // 7. Target Package Container Card
         val targetCard = FrameLayout(this).apply {
             val gd = GradientDrawable().apply {
-                setColor(Color.parseColor("#34EF4444")) // Semi-transparent Red accent
-                cornerRadius = dp(12).toFloat()
-                setStroke(dp(1), Color.parseColor("#66EF4444"))
+                if (blockType == BlockType.WEBSITE) {
+                    setColor(Color.parseColor("#3410B981")) // Semi-transparent Green
+                    cornerRadius = dp(12).toFloat()
+                    setStroke(dp(1), Color.parseColor("#6610B981"))
+                } else {
+                    setColor(Color.parseColor("#34EF4444")) // Semi-transparent Red accent
+                    cornerRadius = dp(12).toFloat()
+                    setStroke(dp(1), Color.parseColor("#66EF4444"))
+                }
             }
             background = gd
             setPadding(dp(16), dp(12), dp(16), dp(12))
@@ -259,7 +426,7 @@ class DigitalParentAccessibilityService : AccessibilityService() {
         }
 
         val targetText = TextView(this).apply {
-            text = "Blocked App: $blockedPackage"
+            text = if (blockType == BlockType.APP) "Blocked App: $target" else "Blocked Website: $target"
             tag = "package_text"
             setTextColor(Color.parseColor("#FFFFFF"))
             textSize = 14f
@@ -294,8 +461,8 @@ class DigitalParentAccessibilityService : AccessibilityService() {
         }
 
         val quoteHeader = TextView(this).apply {
-            text = "BREATHE & DISCONNECT"
-            setTextColor(Color.parseColor("#38BDF8")) // Cool Soft Blue
+            text = if (blockType == BlockType.WEBSITE) "GUIDE TO MINDFULNESS" else "BREATHE & DISCONNECT"
+            setTextColor(if (blockType == BlockType.WEBSITE) Color.parseColor("#10B981") else Color.parseColor("#38BDF8")) // Cool soft blue or emerald
             textSize = 11f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
             gravity = Gravity.CENTER
@@ -304,20 +471,33 @@ class DigitalParentAccessibilityService : AccessibilityService() {
         }
         quoteCard.addView(quoteHeader)
 
-        val quotes = listOf(
+        val appQuotes = listOf(
             "\"Self-control is strength. Right thought is mastery. Calmness is power.\" — James Allen",
             "\"The first and best victory is to conquer self.\" — Plato",
             "\"Rule your mind or it will rule you.\" — Horace",
             "\"It is not that we have a short time to live, but that we waste a lot of it.\" — Seneca",
             "\"Do not let your mind control you, master the present moment instead.\" — Marcus Aurelius"
         )
-        val selectedQuote = quotes.random()
+        
+        val islamicQuotes = listOf(
+            "\"Indeed, the hearing, the sight and the heart - about all those [one] will be questioned.\" — Surah Al-Isra' [17:36]",
+            "\"Tell the believing men to reduce [some] of their vision and guard their private parts. That is purer for them.\" — Surah An-Nur [24:30]",
+            "\"There are two blessings which many people lose: health and free time.\" — Prophet Muhammad (PBUH)",
+            "\"Speak good or remain silent.\" — Prophet Muhammad (PBUH)",
+            "\"A wise man is one who calls himself to account and acts for the life after death.\" — Prophet Muhammad (PBUH)"
+        )
+        
+        val selectedQuote = if (blockType == BlockType.WEBSITE) islamicQuotes.random() else appQuotes.random()
 
         val quoteBody = TextView(this).apply {
             text = selectedQuote
             setTextColor(Color.parseColor("#E2E8F0")) // Slate 200
             textSize = 15f
-            typeface = android.graphics.Typeface.create("serif", android.graphics.Typeface.ITALIC)
+            if (blockType == BlockType.WEBSITE) {
+                typeface = android.graphics.Typeface.create("serif", android.graphics.Typeface.NORMAL)
+            } else {
+                typeface = android.graphics.Typeface.create("serif", android.graphics.Typeface.ITALIC)
+            }
             gravity = Gravity.CENTER
             setLineSpacing(dp(4).toFloat(), 1.0f)
         }
@@ -326,13 +506,13 @@ class DigitalParentAccessibilityService : AccessibilityService() {
 
         // 9. Prominent authoritative "Exit to Home Screen" Button
         val exitButton = Button(this).apply {
-            text = "Exit to Home Screen"
+            text = if (blockType == BlockType.WEBSITE) "Return to Purity (Exit)" else "Exit to Home Screen"
             setTextColor(Color.WHITE)
             textSize = 16f
             typeface = android.graphics.Typeface.DEFAULT_BOLD
             
             val activeBg = GradientDrawable().apply {
-                setColor(Color.parseColor("#E11D48")) // Rose 600
+                setColor(if (blockType == BlockType.WEBSITE) Color.parseColor("#10B981") else Color.parseColor("#E11D48")) // emerald or rose 600
                 cornerRadius = dp(12).toFloat()
             }
             background = activeBg
@@ -380,8 +560,7 @@ class DigitalParentAccessibilityService : AccessibilityService() {
             Log.d("DigitalParentAccess", "Premium fullscreen WindowManager overlay drawn.")
         } catch (e: Exception) {
             Log.e("DigitalParentAccess", "Failed to draw fullscreen overlay via WindowManager", e)
-            // fallback so they never escape
-            launchBlockerWindow(blockedPackage)
+            launchBlockerWindow(target, blockType)
         }
     }
 
@@ -395,13 +574,15 @@ class DigitalParentAccessibilityService : AccessibilityService() {
                 Log.e("DigitalParentAccess", "Failed to remove system overlay view", e)
             }
             premiumOverlayView = null
-            currentOverlayPackage = null
+            currentOverlayTarget = null
+            currentOverlayType = null
         }
     }
 
-    private fun launchBlockerWindow(blockedPackage: String) {
+    private fun launchBlockerWindow(target: String, type: BlockType = BlockType.APP) {
         val intent = Intent(this, BlockerActivity::class.java).apply {
-            putExtra("blocked_app_package", blockedPackage)
+            putExtra("blocked_app_package", target)
+            putExtra("block_type", type.name)
             addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
             addFlags(Intent.FLAG_ACTIVITY_CLEAR_TOP)
             addFlags(Intent.FLAG_ACTIVITY_SINGLE_TOP)

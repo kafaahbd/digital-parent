@@ -237,6 +237,10 @@ class MainViewModel : ViewModel() {
 
     private var lockManager: SettingsLockManager? = null
     private var repository: BlockedAppRepository? = null
+    private var websiteRepo: BlockedWebsiteRepository? = null
+
+    private val _blockedWebsites = MutableStateFlow<List<BlockedWebsiteEntity>>(emptyList())
+    val blockedWebsites: StateFlow<List<BlockedWebsiteEntity>> = _blockedWebsites.asStateFlow()
 
     fun initialize(context: Context) {
         val appCtx = context.applicationContext
@@ -254,6 +258,14 @@ class MainViewModel : ViewModel() {
             viewModelScope.launch {
                 repository!!.allBlockedApps.collect { dbList ->
                     loadInstalledApps(appCtx, dbList)
+                }
+            }
+        }
+        if (websiteRepo == null) {
+            websiteRepo = BlockedWebsiteRepository(appCtx)
+            viewModelScope.launch {
+                websiteRepo!!.allBlockedWebsites.collect { dbList ->
+                    _blockedWebsites.value = dbList
                 }
             }
         }
@@ -364,6 +376,18 @@ class MainViewModel : ViewModel() {
     fun toggleAppBlocked(packageName: String, isBlocked: Boolean) {
         viewModelScope.launch {
             repository?.setAppBlocked(packageName, isBlocked)
+        }
+    }
+
+    fun addBlockedWebsite(urlOrKeyword: String, isKeyword: Boolean) {
+        viewModelScope.launch {
+            websiteRepo?.addBlockedWebsite(urlOrKeyword, isKeyword)
+        }
+    }
+
+    fun removeBlockedWebsite(urlOrKeyword: String) {
+        viewModelScope.launch {
+            websiteRepo?.removeBlockedWebsite(urlOrKeyword)
         }
     }
 
@@ -658,20 +682,32 @@ fun PermissionDashboardScreen(
                 Tab(
                     selected = selectedTab == 0,
                     onClick = { selectedTab = 0 },
-                    text = { Text("Permissions & Monitor", fontWeight = FontWeight.Bold) },
-                    icon = { Icon(Icons.Default.Settings, contentDescription = "Config Icon") }
+                    text = { Text("Dashboard", fontWeight = FontWeight.Bold, fontSize = 11.sp) },
+                    icon = { Icon(Icons.Default.PlayArrow, contentDescription = "Dashboard Icon") }
                 )
                 Tab(
                     selected = selectedTab == 1,
                     onClick = { selectedTab = 1 },
-                    text = { Text("App Block Settings", fontWeight = FontWeight.Bold) },
+                    text = { Text("Permissions", fontWeight = FontWeight.Bold, fontSize = 11.sp) },
+                    icon = { Icon(Icons.Default.Settings, contentDescription = "Permissions Icon") }
+                )
+                Tab(
+                    selected = selectedTab == 2,
+                    onClick = { selectedTab = 2 },
+                    text = { Text("Locked Apps", fontWeight = FontWeight.Bold, fontSize = 11.sp) },
                     icon = { Icon(Icons.Default.Warning, contentDescription = "Block Icon") }
+                )
+                Tab(
+                    selected = selectedTab == 3,
+                    onClick = { selectedTab = 3 },
+                    text = { Text("Locked Sites", fontWeight = FontWeight.Bold, fontSize = 11.sp) },
+                    icon = { Icon(Icons.Default.Lock, contentDescription = "Web Block Icon") }
                 )
             }
 
             Box(modifier = Modifier.weight(1f)) {
                 if (selectedTab == 0) {
-                    // Safeguard Screen
+                    // Dashboard Screen
                     LazyColumn(
                         modifier = Modifier
                             .fillMaxSize()
@@ -694,24 +730,7 @@ fun PermissionDashboardScreen(
                                 blockedCount = blockedAppsCount,
                                 requiredPermissionsCount = permissionsCount,
                                 onActivatePermissions = {
-                                    if (!state.isAccessibilityGranted) {
-                                        val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                                        context.startActivity(intent)
-                                    } else if (!state.isDeviceAdminGranted) {
-                                        val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
-                                            putExtra(
-                                                DevicePolicyManager.EXTRA_DEVICE_ADMIN,
-                                                ComponentName(context, DeviceAdminComponent::class.java)
-                                            )
-                                        }
-                                        context.startActivity(intent)
-                                    } else if (!state.isOverlayGranted) {
-                                        val intent = Intent(
-                                            Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
-                                            Uri.parse("package:${context.packageName}")
-                                        )
-                                        context.startActivity(intent)
-                                    }
+                                    selectedTab = 1 // Smooth redirection to the native Permission Center tab
                                 }
                             )
                         }
@@ -724,10 +743,19 @@ fun PermissionDashboardScreen(
                                 isIgnored = isCurrentAppIgnored
                             )
                         }
-
+                    }
+                } else if (selectedTab == 1) {
+                    // Permission Center Screen
+                    LazyColumn(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(horizontal = 20.dp),
+                        contentPadding = PaddingValues(top = 16.dp, bottom = 32.dp),
+                        verticalArrangement = Arrangement.spacedBy(16.dp)
+                    ) {
                         item {
                             Text(
-                                text = "SYSTEM ACCESS POLICIES",
+                                text = "SYSTEM ACCESS PILLARS",
                                 style = MaterialTheme.typography.titleSmall.copy(
                                     fontWeight = FontWeight.Bold,
                                     letterSpacing = 1.2.sp
@@ -739,7 +767,7 @@ fun PermissionDashboardScreen(
 
                         item {
                             PermissionCard(
-                                title = "1. Accessibility Service",
+                                title = "1. Accessibility Service Guard",
                                 description = "Monitors app switches and window events to determine when restricted foreground applications are opened by children.",
                                 isGranted = state.isAccessibilityGranted,
                                 testTag = "accessibility_card",
@@ -752,7 +780,7 @@ fun PermissionDashboardScreen(
 
                         item {
                             PermissionCard(
-                                title = "2. Device Administrator",
+                                title = "2. Device Protection Guard",
                                 description = "Secures parental profiles on device, requiring parent authentication and preventing children from unauthorized uninstallation.",
                                 isGranted = state.isDeviceAdminGranted,
                                 testTag = "device_admin_card",
@@ -774,7 +802,7 @@ fun PermissionDashboardScreen(
 
                         item {
                             PermissionCard(
-                                title = "3. System Display Overlay",
+                                title = "3. Overlay Drawing Armor",
                                 description = "Draws full-screen warning overlays over unauthorized apps and games, instantly restricting usage when time limits are reached.",
                                 isGranted = state.isOverlayGranted,
                                 testTag = "overlay_card",
@@ -795,7 +823,7 @@ fun PermissionDashboardScreen(
                             )
                         }
                     }
-                } else {
+                } else if (selectedTab == 2) {
                     // App Selection Screen (ALWAYS accessible to enable blocking instantly!)
                     Column(
                         modifier = Modifier
@@ -994,6 +1022,8 @@ fun PermissionDashboardScreen(
                             }
                         }
                     }
+                } else {
+                    BlockedWebsitesScreen(viewModel = viewModel)
                 }
             }
         }
@@ -2767,6 +2797,343 @@ fun LiveCurrentAppCard(
                                 style = MaterialTheme.typography.bodySmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                                 maxLines = 1
+                            )
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+fun BlockedWebsitesScreen(
+    viewModel: MainViewModel
+) {
+    val context = LocalContext.current
+    val blockedWebsites by viewModel.blockedWebsites.collectAsStateWithLifecycle()
+    val isSettingsLocked by viewModel.isSettingsLocked.collectAsStateWithLifecycle()
+    val chosenDelay by viewModel.chosenDelay.collectAsStateWithLifecycle()
+
+    var inputUrl by remember { mutableStateOf("") }
+    var isKeywordMode by remember { mutableStateOf(false) }
+    var showUnlockPromptForSite by remember { mutableStateOf(false) }
+
+    if (showUnlockPromptForSite) {
+        AlertDialog(
+            onDismissRequest = { showUnlockPromptForSite = false },
+            title = {
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Icon(
+                        imageVector = Icons.Default.Warning,
+                        contentDescription = "Alert",
+                        tint = MaterialTheme.colorScheme.error,
+                        modifier = Modifier.size(24.dp)
+                    )
+                    Spacer(modifier = Modifier.width(8.dp))
+                    Text("Deactivation Safeguard Active")
+                }
+            },
+            text = {
+                Text(
+                    text = "Turning OFF restriction rules for this website/keyword belongs to protected settings. To prevent impulsive bypasses, you must start and await through the un-bypassable self-control countdown of $chosenDelay Minute(s). Start countdown now?",
+                    style = MaterialTheme.typography.bodyMedium
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        showUnlockPromptForSite = false
+                        viewModel.initiateSettingsUnlockCountdown()
+                    },
+                    colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error)
+                ) {
+                    Text("Initiate Countdown", color = MaterialTheme.colorScheme.onError)
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { showUnlockPromptForSite = false }) {
+                    Text("Keep Blocked", color = MaterialTheme.colorScheme.primary)
+                }
+            },
+            containerColor = MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(16.dp)
+        )
+    }
+
+    Column(
+        modifier = Modifier
+            .fillMaxSize()
+            .padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp)
+    ) {
+        // Safe lock status indicator
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(
+                containerColor = if (isSettingsLocked) MaterialTheme.colorScheme.primary.copy(alpha = 0.08f) else MaterialTheme.colorScheme.primaryContainer
+            ),
+            border = BorderStroke(1.dp, if (isSettingsLocked) MaterialTheme.colorScheme.primary.copy(alpha = 0.25f) else MaterialTheme.colorScheme.primary)
+        ) {
+            Column(modifier = Modifier.padding(16.dp)) {
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    verticalAlignment = Alignment.CenterVertically,
+                    horizontalArrangement = Arrangement.SpaceBetween
+                ) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(
+                            imageVector = if (isSettingsLocked) Icons.Default.Lock else Icons.Default.CheckCircle,
+                            contentDescription = "Lock Status",
+                            tint = MaterialTheme.colorScheme.primary,
+                            modifier = Modifier.size(20.dp)
+                        )
+                        Spacer(modifier = Modifier.width(8.dp))
+                        Text(
+                            text = if (isSettingsLocked) "Safeguard Shield Engaged" else "Settings Safeguard Unlocked",
+                            style = MaterialTheme.typography.bodyLarge.copy(
+                                fontWeight = FontWeight.Bold,
+                                color = if (isSettingsLocked) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onPrimaryContainer
+                            )
+                        )
+                    }
+                    if (!isSettingsLocked) {
+                        Button(
+                            onClick = { viewModel.initiateSettingsLock() },
+                            colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.error),
+                            shape = RoundedCornerShape(8.dp),
+                            contentPadding = PaddingValues(horizontal = 12.dp, vertical = 6.dp),
+                            modifier = Modifier.height(36.dp)
+                        ) {
+                            Text("Lock Now", fontSize = 12.sp, color = MaterialTheme.colorScheme.onError)
+                        }
+                    }
+                }
+                Spacer(modifier = Modifier.height(8.dp))
+                Text(
+                    text = if (isSettingsLocked) {
+                        "Instant Shielding Active. You can add new websites/keywords to block rules IMMEDIATELY with 0 delay. Turning off restrictions requires your $chosenDelay Minute(s) countdown."
+                    } else {
+                        "You are currently unlocked. Modify block rules freely. Click 'Lock Now' to re-engage safeguard armor."
+                    },
+                    style = MaterialTheme.typography.bodySmall,
+                    color = if (isSettingsLocked) MaterialTheme.colorScheme.onSurfaceVariant else MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.8f)
+                )
+            }
+        }
+
+        // Add Website Block Form
+        Card(
+            modifier = Modifier.fillMaxWidth(),
+            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+            border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+        ) {
+            Column(
+                modifier = Modifier.padding(16.dp),
+                verticalArrangement = Arrangement.spacedBy(10.dp)
+            ) {
+                Text(
+                    text = "ADD WEBSITE RESTRICTION RULE",
+                    style = MaterialTheme.typography.labelMedium.copy(
+                        fontWeight = FontWeight.Bold,
+                        letterSpacing = 1.sp
+                    ),
+                    color = MaterialTheme.colorScheme.primary
+                )
+
+                OutlinedTextField(
+                    value = inputUrl,
+                    onValueChange = { inputUrl = it },
+                    placeholder = {
+                        Text(
+                            text = if (isKeywordMode) "Enter keyword (e.g. facebook)" else "Enter domain/URL (e.g. www.tiktok.com)",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    },
+                    leadingIcon = {
+                        Icon(
+                            imageVector = Icons.Default.Search,
+                            contentDescription = "Search Url",
+                            tint = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    },
+                    modifier = Modifier.fillMaxWidth().testTag("website_input_field"),
+                    singleLine = true,
+                    shape = RoundedCornerShape(12.dp)
+                )
+
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.SpaceBetween,
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = "Matching Type:",
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                        Row(
+                            modifier = Modifier
+                                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
+                                .padding(4.dp),
+                            horizontalArrangement = Arrangement.spacedBy(4.dp)
+                        ) {
+                            val types = listOf(
+                                Pair(false, "Domain Rule"),
+                                Pair(true, "Keyword Rule")
+                            )
+                            types.forEach { (keywordMode, label) ->
+                                val isSelected = isKeywordMode == keywordMode
+                                Box(
+                                    modifier = Modifier
+                                        .background(
+                                            if (isSelected) MaterialTheme.colorScheme.primary else Color.Transparent,
+                                            RoundedCornerShape(6.dp)
+                                        )
+                                        .clickable { isKeywordMode = keywordMode }
+                                        .padding(horizontal = 8.dp, vertical = 4.dp)
+                                ) {
+                                    Text(
+                                        text = label,
+                                        fontSize = 11.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSelected) MaterialTheme.colorScheme.onPrimary else MaterialTheme.colorScheme.onSurfaceVariant
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    Button(
+                        onClick = {
+                            val text = inputUrl.trim()
+                            if (text.isNotBlank()) {
+                                viewModel.addBlockedWebsite(text, isKeywordMode)
+                                inputUrl = ""
+                                Toast.makeText(context, "Url/Keyword restriction added instantly!", Toast.LENGTH_SHORT).show()
+                            } else {
+                                Toast.makeText(context, "Please enter a valid website rule!", Toast.LENGTH_SHORT).show()
+                            }
+                        },
+                        colors = ButtonDefaults.buttonColors(containerColor = MaterialTheme.colorScheme.primary),
+                        shape = RoundedCornerShape(8.dp),
+                        modifier = Modifier.testTag("add_website_button")
+                    ) {
+                        Text("Block", fontWeight = FontWeight.Bold)
+                    }
+                }
+            }
+        }
+
+        Text(
+            text = "ACTIVE WEBSITE RESTRICTIONS",
+            style = MaterialTheme.typography.labelMedium.copy(
+                fontWeight = FontWeight.Bold,
+                letterSpacing = 1.sp
+            ),
+            color = MaterialTheme.colorScheme.primary
+        )
+
+        // Web rules list
+        if (blockedWebsites.isEmpty()) {
+            Box(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f),
+                contentAlignment = Alignment.Center
+            ) {
+                Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(
+                        text = "No restricted websites",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(
+                        text = "Add keyword or domain rules above to protect browser sessions.",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                        fontSize = 11.sp
+                    )
+                }
+            }
+        } else {
+            LazyColumn(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .weight(1f)
+                    .testTag("website_block_list"),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                items(blockedWebsites, key = { site -> site.urlOrKeyword }) { site ->
+                    val containerBg = MaterialTheme.colorScheme.errorContainer.copy(alpha = 0.2f)
+                    val strokeColor = MaterialTheme.colorScheme.error.copy(alpha = 0.4f)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .background(containerBg, RoundedCornerShape(12.dp))
+                            .border(1.dp, strokeColor, RoundedCornerShape(12.dp))
+                            .padding(horizontal = 16.dp, vertical = 10.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Row(
+                            modifier = Modifier.weight(1f),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.spacedBy(10.dp)
+                        ) {
+                            Box(
+                                modifier = Modifier
+                                    .size(36.dp)
+                                    .background(
+                                        MaterialTheme.colorScheme.error.copy(alpha = 0.15f),
+                                        RoundedCornerShape(8.dp)
+                                    ),
+                                contentAlignment = Alignment.Center
+                            ) {
+                                Icon(
+                                    imageVector = if (site.isKeyword) Icons.Default.Search else Icons.Default.Info,
+                                    contentDescription = "Rule Type",
+                                    tint = MaterialTheme.colorScheme.error,
+                                    modifier = Modifier.size(18.dp)
+                                )
+                            }
+                            Column {
+                                Text(
+                                    text = site.urlOrKeyword,
+                                    color = MaterialTheme.colorScheme.onSurface,
+                                    fontWeight = FontWeight.Bold,
+                                    fontSize = 14.sp,
+                                    maxLines = 1
+                                )
+                                Spacer(modifier = Modifier.height(2.dp))
+                                Text(
+                                    text = if (site.isKeyword) "Matches anywhere in address/keyword" else "Matches strict domain",
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.7f),
+                                    fontSize = 11.sp,
+                                    maxLines = 1
+                                )
+                            }
+                        }
+
+                        IconButton(
+                            onClick = {
+                                if (!isSettingsLocked) {
+                                    viewModel.removeBlockedWebsite(site.urlOrKeyword)
+                                    Toast.makeText(context, "Website restriction removed.", Toast.LENGTH_SHORT).show()
+                                } else {
+                                    showUnlockPromptForSite = true
+                                }
+                            },
+                            modifier = Modifier.testTag("delete_site_${site.urlOrKeyword}")
+                        ) {
+                            Icon(
+                                imageVector = Icons.Default.Close,
+                                contentDescription = "Delete site rule",
+                                tint = MaterialTheme.colorScheme.error
                             )
                         }
                     }

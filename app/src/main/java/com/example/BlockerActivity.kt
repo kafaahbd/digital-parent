@@ -33,7 +33,8 @@ class BlockerActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
 
-        val blockedAppPackage = intent.getStringExtra("blocked_app_package") ?: "Unknown Application"
+        val blockedTarget = intent.getStringExtra("blocked_app_package") ?: "Unknown Target"
+        val blockType = intent.getStringExtra("block_type") ?: "APP"
 
         setContent {
             MyApplicationTheme {
@@ -46,7 +47,8 @@ class BlockerActivity : ComponentActivity() {
                     }
 
                     BlockerScreen(
-                        packageName = blockedAppPackage,
+                        target = blockedTarget,
+                        blockType = blockType,
                         paddingValues = innerPadding,
                         onGoHome = { returnToHomeScreen() }
                     )
@@ -67,12 +69,15 @@ class BlockerActivity : ComponentActivity() {
 
 @Composable
 fun BlockerScreen(
-    packageName: String,
+    target: String,
+    blockType: String,
     paddingValues: PaddingValues,
     onGoHome: () -> Unit
 ) {
-    // Elegant system of positive reinforcement & psychological quotes for digital detox
-    val quotes = listOf(
+    val isWebsite = blockType == "WEBSITE"
+
+    // Unified list of quotes
+    val appQuotes = listOf(
         "\"Self-control is strength. Right thought is mastery. Calmness is power.\" — James Allen",
         "\"The first and best victory is to conquer self.\" — Plato",
         "\"Rule your mind or it will rule you.\" — Horace",
@@ -80,8 +85,18 @@ fun BlockerScreen(
         "\"Do not let your mind control you, master the present moment instead.\" — Marcus Aurelius"
     )
 
+    val islamicQuotes = listOf(
+        "\"Indeed, the hearing, the sight and the heart - about all those [one] will be questioned.\" — Surah Al-Isra' [17:36]",
+        "\"Tell the believing men to reduce [some] of their vision and guard their private parts. That is purer for them.\" — Surah An-Nur [24:30]",
+        "\"There are two blessings which many people lose: health and free time.\" — Prophet Muhammad (PBUH)",
+        "\"Speak good or remain silent.\" — Prophet Muhammad (PBUH)",
+        "\"A wise man is one who calls himself to account and acts for the life after death.\" — Prophet Muhammad (PBUH)"
+    )
+
     // Remember a random quote so it's stable per recomposition
-    val selectedQuote = remember(packageName) { quotes.random() }
+    val selectedQuote = remember(target) {
+        if (isWebsite) islamicQuotes.random() else appQuotes.random()
+    }
 
     Box(
         modifier = Modifier
@@ -89,10 +104,17 @@ fun BlockerScreen(
             .padding(paddingValues)
             .background(
                 Brush.verticalGradient(
-                    colors = listOf(
-                        Color(0xFF450A0A), // Extremely Dark Cherry/Red Red 950
-                        Color(0xFF0F172A)  // Slate 900
-                    )
+                    colors = if (isWebsite) {
+                        listOf(
+                            Color(0xFF14532D), // Deep Islamic/Emerald Green
+                            Color(0xFF0F172A)  // Slate 900
+                        )
+                    } else {
+                        listOf(
+                            Color(0xFF450A0A), // Extremely Dark Cherry/Red Red 950
+                            Color(0xFF0F172A)  // Slate 900
+                        )
+                    }
                 )
             ),
         contentAlignment = Alignment.Center
@@ -104,17 +126,20 @@ fun BlockerScreen(
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center
         ) {
-            // Elegant pulsing shield lock logo
+            // Elegant pulsing shield lock / mosque logo
             Box(
                 modifier = Modifier
                     .size(80.dp)
-                    .background(Color(0xFFEF4444).copy(alpha = 0.12f), RoundedCornerShape(24.dp)),
+                    .background(
+                        if (isWebsite) Color(0xFF10B981).copy(alpha = 0.12f) else Color(0xFFEF4444).copy(alpha = 0.12f),
+                        RoundedCornerShape(24.dp)
+                    ),
                 contentAlignment = Alignment.Center
             ) {
                 Icon(
                     imageVector = Icons.Default.Lock,
                     contentDescription = "Shield Lock Icon",
-                    tint = Color(0xFFF87171), // Soft Red
+                    tint = if (isWebsite) Color(0xFF34D399) else Color(0xFFF87171), // Soft Emerald or Soft Red
                     modifier = Modifier.size(40.dp)
                 )
             }
@@ -122,18 +147,18 @@ fun BlockerScreen(
             Spacer(modifier = Modifier.height(32.dp))
 
             Text(
-                text = "ACCESS RESTRICTED",
+                text = if (isWebsite) "WEBSITE ACCESS RESTRICTED" else "APPLICATION ACCESS RESTRICTED",
                 style = MaterialTheme.typography.titleSmall.copy(
                     fontWeight = FontWeight.Bold,
                     letterSpacing = 2.sp,
-                    color = Color(0xFFF87171)
+                    color = if (isWebsite) Color(0xFF34D399) else Color(0xFFF87171)
                 )
             )
 
             Spacer(modifier = Modifier.height(12.dp))
 
             Text(
-                text = "Digital Guard Active",
+                text = if (isWebsite) "Divine Guard Active" else "Digital Guard Active",
                 style = MaterialTheme.typography.headlineMedium.copy(
                     fontWeight = FontWeight.Bold,
                     color = Color.White
@@ -153,14 +178,14 @@ fun BlockerScreen(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = "Restricted Target App:",
+                        text = if (isWebsite) "Restricted Target Website:" else "Restricted Target App:",
                         fontSize = 11.sp,
                         color = Color(0xFF94A3B8), // Slate 400
                         fontWeight = FontWeight.Medium
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        text = packageName,
+                        text = target,
                         fontSize = 14.sp,
                         color = Color(0xFFF1F5F9), // Slate 100
                         fontWeight = FontWeight.Bold,
@@ -172,7 +197,7 @@ fun BlockerScreen(
 
             Spacer(modifier = Modifier.height(32.dp))
 
-            // Psychology & Mindfulness card
+            // Psychology / Spiritual & Mindfulness card
             Card(
                 modifier = Modifier.fillMaxWidth(),
                 colors = CardDefaults.cardColors(containerColor = Color.White.copy(alpha = 0.06f)),
@@ -183,17 +208,16 @@ fun BlockerScreen(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = "BREATHE & DISCONNECT",
+                        text = if (isWebsite) "GUIDE TO PURITY" else "BREATHE & DISCONNECT",
                         fontSize = 11.sp,
                         fontWeight = FontWeight.Bold,
                         letterSpacing = 1.sp,
-                        color = Color(0xFF38BDF8) // Soft Blue
+                        color = if (isWebsite) Color(0xFF10B981) else Color(0xFF38BDF8) // Emerald or Soft Blue
                     )
                     Spacer(modifier = Modifier.height(12.dp))
                     Text(
                         text = selectedQuote,
                         style = MaterialTheme.typography.bodyLarge.copy(
-                            fontStyle = androidx.compose.ui.text.font.FontStyle.Italic,
                             lineHeight = 22.sp
                         ),
                         color = Color(0xFFE2E8F0),
@@ -207,7 +231,7 @@ fun BlockerScreen(
             Button(
                 onClick = onGoHome,
                 colors = ButtonDefaults.buttonColors(
-                    containerColor = Color(0xFFEF4444), // Crimson/Red 500
+                    containerColor = if (isWebsite) Color(0xFF10B981) else Color(0xFFEF4444), // Emerald or Crimson
                     contentColor = Color.White
                 ),
                 shape = RoundedCornerShape(12.dp),
@@ -226,7 +250,7 @@ fun BlockerScreen(
                     )
                     Spacer(modifier = Modifier.width(8.dp))
                     Text(
-                        text = "Exit to Device Home Screen",
+                        text = if (isWebsite) "Return to Purity" else "Exit to Device Home Screen",
                         fontWeight = FontWeight.Bold,
                         fontSize = 16.sp
                     )
