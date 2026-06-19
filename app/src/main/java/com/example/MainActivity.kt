@@ -25,6 +25,8 @@ import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
 import androidx.annotation.Keep
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.foundation.layout.*
@@ -200,14 +202,25 @@ data class AppInfoItem(
 data class PermissionsState(
     val isAccessibilityGranted: Boolean = false,
     val isDeviceAdminGranted: Boolean = false,
-    val isOverlayGranted: Boolean = false
+    val isOverlayGranted: Boolean = false,
+    val isUsageAccessGranted: Boolean = false,
+    val isNotificationAccessGranted: Boolean = false
 )
 
 class MainViewModel : ViewModel() {
     private val _permissionsState = MutableStateFlow(PermissionsState())
     val permissionsState: StateFlow<PermissionsState> = _permissionsState.asStateFlow()
 
-    private val _healthState = MutableStateFlow(ProtectionHealthState(false, false, false, false))
+    private val _healthState = MutableStateFlow(
+        ProtectionHealthState(
+            isAccessibilityEnabled = false,
+            isOverlayEnabled = false,
+            isDeviceAdminEnabled = false,
+            isUsageAccessEnabled = false,
+            isNotificationAccessEnabled = false,
+            isAllHealthy = false
+        )
+    )
     val healthState: StateFlow<ProtectionHealthState> = _healthState.asStateFlow()
 
     private var healthRepository: ProtectionHealthRepository? = null
@@ -294,7 +307,9 @@ class MainViewModel : ViewModel() {
                     _permissionsState.value = PermissionsState(
                         isAccessibilityGranted = hState.isAccessibilityEnabled,
                         isDeviceAdminGranted = hState.isDeviceAdminEnabled,
-                        isOverlayGranted = hState.isOverlayEnabled
+                        isOverlayGranted = hState.isOverlayEnabled,
+                        isUsageAccessGranted = hState.isUsageAccessEnabled,
+                        isNotificationAccessGranted = hState.isNotificationAccessEnabled
                     )
                 }
             }
@@ -570,6 +585,62 @@ fun PermissionDashboardScreen(
         return
     }
 
+    // --- FULL-SCREEN PROTECTION WARNING (ANTI-TAMPER SELF-DEFENSE) ---
+    if (!healthState.isAllHealthy) {
+        ProtectionRecoveryScreen(
+            healthState = healthState,
+            onNavigateAccessibility = {
+                val intent = Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                context.startActivity(intent)
+            },
+            onNavigateOverlay = {
+                val intent = Intent(
+                    Settings.ACTION_MANAGE_OVERLAY_PERMISSION,
+                    Uri.parse("package:${context.packageName}")
+                )
+                context.startActivity(intent)
+            },
+            onNavigateDeviceAdmin = {
+                val intent = Intent(DevicePolicyManager.ACTION_ADD_DEVICE_ADMIN).apply {
+                    putExtra(
+                        DevicePolicyManager.EXTRA_DEVICE_ADMIN,
+                        ComponentName(context, DeviceAdminComponent::class.java)
+                    )
+                    putExtra(
+                        DevicePolicyManager.EXTRA_ADD_EXPLANATION,
+                        "Provides parental/system-level device controls to prevent unauthorized app uninstallation."
+                    )
+                }
+                context.startActivity(intent)
+            },
+            onNavigateUsageAccess = {
+                val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
+                    data = Uri.parse("package:${context.packageName}")
+                }
+                try {
+                    context.startActivity(intent)
+                } catch (e: Exception) {
+                    try {
+                        context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                    } catch (ex: Exception) {
+                        ex.printStackTrace()
+                    }
+                }
+            },
+            onNavigateNotificationAccess = {
+                try {
+                    context.startActivity(Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"))
+                } catch (e: Exception) {
+                    e.printStackTrace()
+                }
+            },
+            onRefresh = {
+                viewModel.checkPermissions(context)
+            }
+        )
+        return
+    }
+
 
 
     // --- COOLDOWN BLOCKOVERLAY (UN-BYPASSABLE FOREGROUND LOCK) ---
@@ -754,11 +825,13 @@ fun PermissionDashboardScreen(
                         }
 
                         item {
-                            val isProtected = state.isAccessibilityGranted && state.isDeviceAdminGranted && state.isOverlayGranted
+                            val isProtected = state.isAccessibilityGranted && state.isDeviceAdminGranted && state.isOverlayGranted && state.isUsageAccessGranted && state.isNotificationAccessGranted
                             val blockedAppsCount = appItems.count { it.isBlocked }
                             val permissionsCount = (if (state.isAccessibilityGranted) 1 else 0) + 
                                                    (if (state.isDeviceAdminGranted) 1 else 0) + 
-                                                   (if (state.isOverlayGranted) 1 else 0)
+                                                   (if (state.isOverlayGranted) 1 else 0) +
+                                                   (if (state.isUsageAccessGranted) 1 else 0) +
+                                                   (if (state.isNotificationAccessGranted) 1 else 0)
                             StatusCard(
                                 isProtected = isProtected,
                                 blockedCount = blockedAppsCount,
@@ -846,6 +919,45 @@ fun PermissionDashboardScreen(
                                         Uri.parse("package:${context.packageName}")
                                     )
                                     context.startActivity(intent)
+                                }
+                            )
+                        }
+
+                        item {
+                            PermissionCard(
+                                title = "4. App Usage Stats Monitor",
+                                description = "Permits Hefazot to continuously track active system processes for reliable block compliance and device protection.",
+                                isGranted = state.isUsageAccessGranted,
+                                testTag = "usage_access_card",
+                                onConfigure = {
+                                    val intent = Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS).apply {
+                                        data = Uri.parse("package:${context.packageName}")
+                                    }
+                                    try {
+                                        context.startActivity(intent)
+                                    } catch (e: Exception) {
+                                        try {
+                                            context.startActivity(Intent(Settings.ACTION_USAGE_ACCESS_SETTINGS))
+                                        } catch (ex: Exception) {
+                                            ex.printStackTrace()
+                                        }
+                                    }
+                                }
+                            )
+                        }
+
+                        item {
+                            PermissionCard(
+                                title = "5. Notification Guard Listener",
+                                description = "Monitors alerts and distractions so that inappropriate alert content or notification noise is intercepted instantly.",
+                                isGranted = state.isNotificationAccessGranted,
+                                testTag = "notification_access_card",
+                                onConfigure = {
+                                    try {
+                                        context.startActivity(Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"))
+                                    } catch (e: Exception) {
+                                        e.printStackTrace()
+                                    }
                                 }
                             )
                         }
@@ -1907,9 +2019,9 @@ fun StatusCard(
                     horizontalAlignment = Alignment.CenterHorizontally
                 ) {
                     Text(
-                        text = "$requiredPermissionsCount/3",
+                        text = "$requiredPermissionsCount/5",
                         style = MaterialTheme.typography.titleLarge.copy(fontWeight = FontWeight.ExtraBold),
-                        color = if (requiredPermissionsCount == 3) colorScheme.primary else colorScheme.error
+                        color = if (requiredPermissionsCount == 5) colorScheme.primary else colorScheme.error
                     )
                     Text(
                         text = "Core Anchors",
@@ -1919,7 +2031,7 @@ fun StatusCard(
                 }
             }
 
-            if (requiredPermissionsCount < 3) {
+            if (requiredPermissionsCount < 5) {
                 Spacer(modifier = Modifier.height(16.dp))
                 Button(
                     onClick = onActivatePermissions,
@@ -2441,9 +2553,12 @@ fun ProtectionRecoveryScreen(
     onNavigateAccessibility: () -> Unit,
     onNavigateOverlay: () -> Unit,
     onNavigateDeviceAdmin: () -> Unit,
+    onNavigateUsageAccess: () -> Unit,
+    onNavigateNotificationAccess: () -> Unit,
     onRefresh: () -> Unit
 ) {
     val colorScheme = MaterialTheme.colorScheme
+    val scrollState = rememberScrollState()
 
     Box(
         modifier = Modifier
@@ -2455,10 +2570,13 @@ fun ProtectionRecoveryScreen(
         Column(
             modifier = Modifier
                 .fillMaxWidth()
-                .widthIn(max = 500.dp),
+                .widthIn(max = 500.dp)
+                .verticalScroll(scrollState),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.spacedBy(16.dp)
         ) {
+            Spacer(modifier = Modifier.height(24.dp))
+
             // Header Shield Icon
             Box(
                 modifier = Modifier
@@ -2493,7 +2611,7 @@ fun ProtectionRecoveryScreen(
             )
 
             Text(
-                text = "To maintain your self-control guard, all three system pillars must remain active. We detected that one or more vital anchors were turned off.",
+                text = "To maintain your self-control guard, all five system pillars must remain active. We detected that one or more vital anchors were turned off.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = colorScheme.onSurfaceVariant,
                 textAlign = TextAlign.Center,
@@ -2510,7 +2628,15 @@ fun ProtectionRecoveryScreen(
                 onGrantClick = onNavigateAccessibility
             )
 
-            // Pillar 2: Overlay
+            // Pillar 2: Device Admin
+            PermissionPillarCard(
+                title = "System Level Device Admin",
+                description = "Provides parental/system protection to shield this app against bypass modifications or tampering.",
+                isGranted = healthState.isDeviceAdminEnabled,
+                onGrantClick = onNavigateDeviceAdmin
+            )
+
+            // Pillar 3: Overlay
             PermissionPillarCard(
                 title = "Overlay Drawing Armor",
                 description = "Permits the app to draw the secure containment screen on top of blocked applications.",
@@ -2518,12 +2644,20 @@ fun ProtectionRecoveryScreen(
                 onGrantClick = onNavigateOverlay
             )
 
-            // Pillar 3: Device Admin
+            // Pillar 4: Usage Access
             PermissionPillarCard(
-                title = "System Level Device Admin",
-                description = "Provides parental/system protection to shield this app against bypass modifications or tampering.",
-                isGranted = healthState.isDeviceAdminEnabled,
-                onGrantClick = onNavigateDeviceAdmin
+                title = "App Usage Stats Monitor",
+                description = "Permits Hefazot to continuously track active system processes for reliable block compliance.",
+                isGranted = healthState.isUsageAccessEnabled,
+                onGrantClick = onNavigateUsageAccess
+            )
+
+            // Pillar 5: Notification Guard
+            PermissionPillarCard(
+                title = "Notification Guard Listener",
+                description = "Monitors alert payloads so distraction triggers or harmful text alerts are blocked instantly.",
+                isGranted = healthState.isNotificationAccessEnabled,
+                onGrantClick = onNavigateNotificationAccess
             )
 
             Spacer(modifier = Modifier.height(12.dp))
@@ -2545,6 +2679,8 @@ fun ProtectionRecoveryScreen(
                     Text("REVALIDATE HEALTH ANCHORS", fontWeight = FontWeight.Bold)
                 }
             }
+
+            Spacer(modifier = Modifier.height(24.dp))
         }
     }
 }

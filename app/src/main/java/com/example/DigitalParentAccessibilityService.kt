@@ -24,7 +24,7 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
-enum class BlockType { APP, WEBSITE, CONTENT_WARN }
+enum class BlockType { APP, WEBSITE, CONTENT_WARN, TAMPER_WARNING }
 
 class DigitalParentAccessibilityService : AccessibilityService() {
 
@@ -138,6 +138,60 @@ class DigitalParentAccessibilityService : AccessibilityService() {
                 Log.d("DigitalParentAccess", "Updated blocked websites cache: ${entities.map { it.urlOrKeyword }}")
             }
         }
+
+        // Continuous Tamper Monitoring & Self-Defense System loop
+        serviceScope.launch {
+            while (true) {
+                try {
+                    kotlinx.coroutines.delay(3000) // Run check every 3 seconds
+                    if (settingsLockManager.isOnboardingCompleted()) {
+                        val isOverlayGranted = android.provider.Settings.canDrawOverlays(this@DigitalParentAccessibilityService)
+
+                        val dpm = getSystemService(Context.DEVICE_POLICY_SERVICE) as? android.app.admin.DevicePolicyManager
+                        val adminComponent = android.content.ComponentName(this@DigitalParentAccessibilityService, DeviceAdminComponent::class.java)
+                        val isAdminActivated = dpm?.isAdminActive(adminComponent) == true
+
+                        val appOps = getSystemService(Context.APP_OPS_SERVICE) as? android.app.AppOpsManager
+                        val mode = appOps?.noteOpNoThrow(
+                            android.app.AppOpsManager.OPSTR_GET_USAGE_STATS,
+                            android.os.Process.myUid(),
+                            packageName
+                        )
+                        val isUsageGranted = mode == android.app.AppOpsManager.MODE_ALLOWED
+
+                        val enabledListeners = android.provider.Settings.Secure.getString(contentResolver, "enabled_notification_listeners") ?: ""
+                        val isNotificationGranted = enabledListeners.split(':').any {
+                            val component = android.content.ComponentName.unflattenFromString(it)
+                            component != null && component.packageName == packageName
+                        }
+
+                        if (!isOverlayGranted || !isAdminActivated || !isUsageGranted || !isNotificationGranted) {
+                            val inactivePillar = when {
+                                !isOverlayGranted -> "OVERLAY"
+                                !isAdminActivated -> "DEVICE_ADMIN"
+                                !isUsageGranted -> "USAGE_ACCESS"
+                                !isNotificationGranted -> "NOTIFICATION_ACCESS"
+                                else -> ""
+                            }
+                            
+                            val fg = _foregroundApp.value
+                            val isCurrentlyConfiguring = fg == packageName ||
+                                    fg == "com.android.settings" ||
+                                    fg.startsWith("com.android.settings") ||
+                                    fg.startsWith("com.android.permissioncontroller") ||
+                                    fg.startsWith("com.google.android.permissioncontroller")
+
+                            if (!isCurrentlyConfiguring && inactivePillar.isNotEmpty()) {
+                                Log.e("DigitalParentAccess", "TAMPER DETECTED: Pillar $inactivePillar was disabled! Launching blocker overlay.")
+                                launchBlockerWindow(inactivePillar, BlockType.TAMPER_WARNING)
+                            }
+                        }
+                    }
+                } catch (e: Exception) {
+                    Log.e("DigitalParentAccess", "Error in continuous tamper checker loop", e)
+                }
+            }
+        }
     }
 
     override fun onAccessibilityEvent(event: AccessibilityEvent?) {
@@ -146,6 +200,31 @@ class DigitalParentAccessibilityService : AccessibilityService() {
         val packageNameChar = event.packageName
         if (packageNameChar != null) {
             val packageName = packageNameChar.toString()
+            
+            // Interrupt uninstall attempt for Hefazot which would bypass blocks
+            if (packageName.startsWith("com.android.packageinstaller") ||
+                packageName.startsWith("com.google.android.packageinstaller") ||
+                packageName.startsWith("com.android.settings")
+            ) {
+                val rootNode = rootInActiveWindow
+                if (rootNode != null) {
+                    val builder = java.lang.StringBuilder()
+                    extractTextFromNode(rootNode, builder)
+                    val screenText = builder.toString().lowercase(java.util.Locale.ROOT)
+                    rootNode.recycle()
+
+                    if (screenText.contains("hefazot") && (screenText.contains("uninstall") || screenText.contains("delete") || screenText.contains("un-install"))) {
+                        launchBlockerWindow("Hefazot Shield Defense", BlockType.CONTENT_WARN)
+                        // Force back to home
+                        val startMain = Intent(Intent.ACTION_MAIN).apply {
+                            addCategory(Intent.CATEGORY_HOME)
+                            flags = Intent.FLAG_ACTIVITY_NEW_TASK
+                        }
+                        startActivity(startMain)
+                        return
+                    }
+                }
+            }
             
             // Flag to check if we handled website blocking
             var websiteInterceded = false
